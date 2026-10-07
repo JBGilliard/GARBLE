@@ -1,0 +1,17 @@
+[package]
+name = "proto"
+description = "Every byte on the wire or in the log: versioned envelopes, extensions, cards, credentials, DS API, log entries."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+markings.workspace = true
+policy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

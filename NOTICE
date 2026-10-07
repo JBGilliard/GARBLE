@@ -1,0 +1,6 @@
+GARBLE
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+crates/markings adapts code and sample register data from Meridian
+(crates/lexicon-core/src/marking.rs, crates/lexicon-pools/data/iso3166_alpha3.txt),
+Copyright Joe Gilliard, licensed under the Apache License, Version 2.0.

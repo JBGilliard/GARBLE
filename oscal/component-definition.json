@@ -1,0 +1,399 @@
+{
+  "component-definition": {
+    "components": [
+      {
+        "control-implementations": [
+          {
+            "description": "NIST SP 800-53 Rev 5 controls implemented by cli.",
+            "implemented-requirements": [
+              {
+                "control-id": "ac-3.3",
+                "description": "The client doesn't rely on the DS having enforced the policy. It decides with the same function before it adds a member or sends, and an invitee refuses a room whose ceiling is above its own clearance. A commit the DS sequenced against the rules freezes the room on that client (integrity hold).",
+                "links": [
+                  {
+                    "href": "crates/identity/src/room.rs",
+                    "rel": "reference",
+                    "text": "fn check_message"
+                  },
+                  {
+                    "href": "crates/client/src/lib.rs",
+                    "rel": "reference",
+                    "text": "IntegrityHold"
+                  },
+                  {
+                    "href": "scripts/money-demo.sh",
+                    "rel": "reference"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "provided"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::invitee_refuses_a_room_above_its_clearance"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::send_checks_ceiling_then_sender"
+                  }
+                ],
+                "uuid": "c5840f3b-b9d5-5019-abfa-8185d9987ae0"
+              },
+              {
+                "control-id": "ac-4",
+                "description": "Receivers check the same rule again: a message above the ceiling, or from a sender whose credential doesn't cover its marking, is quarantined instead of shown. Forwarding between rooms keeps the original marking, so a destination whose ceiling is lower refuses the message and the refusal is logged. Attachments can't be forwarded between rooms yet (Q18).",
+                "links": [
+                  {
+                    "href": "crates/client/src/lib.rs",
+                    "rel": "reference",
+                    "text": "fn check_received"
+                  },
+                  {
+                    "href": "crates/client/src/lib.rs",
+                    "rel": "reference",
+                    "text": "pub fn forward"
+                  },
+                  {
+                    "href": "scripts/demo.sh",
+                    "rel": "reference"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "provided"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::send_checks_ceiling_then_sender"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "client::files::tests::a_file_message_must_agree_with_its_signed_header"
+                  }
+                ],
+                "uuid": "5f1acc74-030e-5aa8-bfb8-3fdd847c1f48"
+              }
+            ],
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "uuid": "81da6ca1-6ad1-5224-9084-01d145f50046"
+          }
+        ],
+        "description": "Holds the member's keys. Re-runs the room policy on everything it receives and on everything it is about to send, so a hostile DS can't make it accept or emit a policy violation.",
+        "title": "GARBLE client (garble-cli and the desktop console)",
+        "type": "software",
+        "uuid": "3e9f775c-c11d-549a-af4e-fde177b53d43"
+      },
+      {
+        "control-implementations": [
+          {
+            "description": "NIST SP 800-53 Rev 5 controls implemented by custodian.",
+            "implemented-requirements": [
+              {
+                "control-id": "au-10",
+                "description": "Each message is MLS-signed by its sender, and the sender's copy is sealed to the custodian's ML-KEM-1024 key with its hash bound into the signed data and the log entry. Opening the archive needs a DS-logged ReadArchive permit for a listed records officer. Hybrid: the procedure is enforced by the custodian binary, not by cryptography, so the key holder can bypass it (Q16), and a sender can seal a copy that differs from what members got (Q17).",
+                "links": [
+                  {
+                    "href": "crates/identity/src/archive.rs",
+                    "rel": "reference",
+                    "text": "pub fn seal_archive"
+                  },
+                  {
+                    "href": "crates/custodian/src/lib.rs",
+                    "rel": "reference",
+                    "text": "pub fn verify_permit"
+                  },
+                  {
+                    "href": "crates/policy/src/lib.rs",
+                    "rel": "reference",
+                    "text": "Action::ReadArchive"
+                  },
+                  {
+                    "href": "scripts/archive-demo.sh",
+                    "rel": "reference"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "hybrid"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::archive_reads_need_a_cleared_records_officer"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "identity::archive::tests::only_the_private_key_opens_a_copy_and_only_for_its_room"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "identity::archive::tests::a_tampered_copy_is_refused"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "custodian::tests::a_permit_opens_once"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "custodian::tests::a_permit_has_to_be_in_a_log_the_bundle_trusts"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "ds::tests::files_and_the_archive_go_through_the_ds_and_open_only_with_a_logged_permit"
+                  }
+                ],
+                "uuid": "c905fe76-7a8f-59a7-a685-57161e6adfc4"
+              }
+            ],
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "uuid": "3e85beae-9b9a-5d0d-aed6-ebd656635a7e"
+          }
+        ],
+        "description": "Pulls the sealed archive copy of every message into an append-only store. Holds no private key; opens a record only against a DS-logged permit.",
+        "title": "GARBLE records custodian",
+        "type": "software",
+        "uuid": "e0423a47-3b98-5e3e-807e-1c61bac18b79"
+      },
+      {
+        "control-implementations": [
+          {
+            "description": "NIST SP 800-53 Rev 5 controls implemented by ds.",
+            "implemented-requirements": [
+              {
+                "control-id": "ac-3.3",
+                "description": "Access to rooms and to the audit log is decided by one pure function, policy::decide, from the subject's issuer-signed attributes and the object's marking. The DS runs it on room creation, every add, every message and every log read; a subject whose clearance doesn't dominate the room ceiling (or the entry's marking) is denied, and the denial is logged. The rule is not discretionary: no member or steward can grant access past what the attributes cover. Because membership requires clearance for the ceiling and messages must sit within it, a member cleared for the ceiling is cleared for every message in the room.",
+                "links": [
+                  {
+                    "href": "crates/policy/src/lib.rs",
+                    "rel": "reference",
+                    "text": "pub fn decide"
+                  },
+                  {
+                    "href": "crates/markings/src/lattice.rs",
+                    "rel": "reference",
+                    "text": "pub fn dominates"
+                  },
+                  {
+                    "href": "crates/ds/src/main.rs",
+                    "rel": "reference",
+                    "text": "fn decided"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "provided"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::add_refuses_joiner_missing_a_compartment"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::raising_the_ceiling_needs_every_member_cleared"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::expired_attributes_deny_everything"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::log_entries_need_clearance_for_their_marking"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "markings::proptests::cleared_for_ceiling_implies_cleared_for_contents"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "ds::tests::entries_are_readable_only_by_the_cleared"
+                  }
+                ],
+                "uuid": "e4cf730c-e64e-52ce-9b61-22c2df398adb"
+              },
+              {
+                "control-id": "ac-4",
+                "description": "A message goes into a room only if its marking is within the room ceiling. The marking rides in the MLS-authenticated data of every application message, so the DS reads it without reading the content, refuses a message above the ceiling and logs the refusal with a reason code. Entries about a room are readable only by users cleared for that room's marking.",
+                "links": [
+                  {
+                    "href": "crates/policy/src/lib.rs",
+                    "rel": "reference",
+                    "text": "Action::Send"
+                  },
+                  {
+                    "href": "crates/markings/src/lattice.rs",
+                    "rel": "reference",
+                    "text": "pub fn within"
+                  },
+                  {
+                    "href": "crates/ds/src/main.rs",
+                    "rel": "reference",
+                    "text": "fn decided"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "provided"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "policy::tests::send_checks_ceiling_then_sender"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "markings::tests::within_room_ceilings"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "markings::proptests::within_is_sound_for_the_least_cleared_member"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "ds::tests::messages_are_logged_by_hash_and_rooms_stay_in_their_clearance"
+                  }
+                ],
+                "uuid": "cac6993c-6dda-5d5f-b347-e08192310153"
+              }
+            ],
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "uuid": "b3a09f3e-f585-5a2c-b4c0-d8df7084ffab"
+          }
+        ],
+        "description": "Sequences MLS messages and handshakes, runs the shared policy on every one, and logs each decision. Operators run it; they aren't room members.",
+        "title": "GARBLE delivery service",
+        "type": "software",
+        "uuid": "e3448425-04b7-5b23-892a-8f4aa2da8b6e"
+      },
+      {
+        "control-implementations": [
+          {
+            "description": "NIST SP 800-53 Rev 5 controls implemented by log.",
+            "implemented-requirements": [
+              {
+                "control-id": "au-10",
+                "description": "Every decision, permit or deny, is a leaf in an append-only Merkle log. After each request the DS signs a checkpoint with its ML-DSA-87 log key. A client keeps the last checkpoint it accepted and refuses one that isn't signed by the trusted key or doesn't extend it, then stops sending. `garble log verify` proves each readable entry is in the signed tree. No witnesses or cosignatures yet, and the first checkpoint is trusted on first use.",
+                "links": [
+                  {
+                    "href": "crates/tlog/src/proof.rs",
+                    "rel": "reference",
+                    "text": "pub fn verify_inclusion"
+                  },
+                  {
+                    "href": "crates/tlog/src/proof.rs",
+                    "rel": "reference",
+                    "text": "pub fn verify_consistency"
+                  },
+                  {
+                    "href": "crates/tlog/src/note.rs",
+                    "rel": "reference",
+                    "text": "pub fn sign_checkpoint"
+                  },
+                  {
+                    "href": "crates/tlog/src/note.rs",
+                    "rel": "reference",
+                    "text": "pub fn open_checkpoint"
+                  },
+                  {
+                    "href": "crates/client/src/audit.rs",
+                    "rel": "reference",
+                    "text": "pub fn verify_log"
+                  }
+                ],
+                "props": [
+                  {
+                    "name": "responsibility",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "provided"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "tlog::tests::matches_the_certificate_transparency_vectors"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "tlog::tests::proofs_verify_and_tampering_fails"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "tlog::note::tests::tampering_and_wrong_keys_fail"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "identity::log::tests::ml_dsa_checkpoints_verify_and_reject_other_keys"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "client::audit::tests::rewritten_history_is_refused"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "client::audit::tests::a_shorter_log_is_refused"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "ds::tests::proofs_and_tiles_match_the_signed_checkpoints"
+                  },
+                  {
+                    "name": "test",
+                    "ns": "https://garble.invalid/ns/oscal",
+                    "value": "ds::tests::no_route_deletes_or_rewrites_anything"
+                  }
+                ],
+                "uuid": "ed65d503-062c-51e4-ac76-10158f949567"
+              }
+            ],
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "uuid": "43463d37-bd87-5416-906d-a4796881c2ca"
+          }
+        ],
+        "description": "RFC 6962 Merkle log in the C2SP tlog-tiles layout, with an ML-DSA-87 signed checkpoint after every DS request.",
+        "title": "GARBLE transparency log",
+        "type": "software",
+        "uuid": "f6b96e28-37da-509a-b9ee-d3316f0df9e4"
+      }
+    ],
+    "metadata": {
+      "last-modified": "2026-10-06T00:00:00Z",
+      "oscal-version": "1.2.3",
+      "title": "GARBLE",
+      "version": "0.1.0"
+    },
+    "uuid": "cadd0cdc-2f76-535f-a340-bce333b8a26e"
+  }
+}

@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Toolchain version and components come from rust-toolchain.toml.
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: fmt
+        run: cargo fmt --all --check
+      # garble-desktop needs webkit2gtk and a built UI; it has its own job below.
+      - name: clippy
+        run: cargo clippy --workspace --exclude garble-desktop --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test --workspace --exclude garble-desktop --locked
+      - name: dependency rules (§3.1)
+        run: cargo xtask check-deps
+      - name: control map (fails on a missing path or test; output must be committed)
+        run: |
+          cargo xtask oscal
+          git diff --exit-code oscal
+      - name: end-to-end demo
+        run: scripts/demo.sh
+      - name: money demo (four-point enforcement + fork freeze)
+        run: scripts/money-demo.sh
+      - name: files and records archive demo
+        run: scripts/archive-demo.sh
+
+  desktop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: webview system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libssl-dev librsvg2-dev
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: crates/garble-desktop/ui/package-lock.json
+      - name: UI (typecheck + bundle; the app embeds the bundle at compile time)
+        working-directory: crates/garble-desktop/ui
+        run: |
+          npm ci
+          npm run build
+      - name: clippy
+        run: cargo clippy -p garble-desktop --all-targets --locked -- -D warnings
+      - name: test
+        run: cargo test -p garble-desktop --locked
+      - name: build
+        run: cargo build -p garble-desktop --locked
+
+  # Nightly-only (libFuzzer sanitizers); kept apart so the pinned toolchain stays as is.
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install nightly --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: fuzz (60s per target)
+        working-directory: fuzz
+        # Seeds are copied in because a corpus dir passed after `--` becomes the output dir.
+        run: |
+          for t in marking_parse marking_canonical wire_decode; do
+            mkdir -p corpus/$t
+            cp seeds/$t/* corpus/$t/
+            rustup run nightly cargo fuzz run $t -- -max_total_time=60
+          done
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # unmatched-wrapper is a warning by default; it is how the openmls ban fires.
+          command: check -D unmatched-wrapper

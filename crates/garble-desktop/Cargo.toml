@@ -1,0 +1,25 @@
+[package]
+name = "garble-desktop"
+description = "GARBLE desktop app (Tauri). Thin command adapter over the client core."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+build = "build.rs"
+
+[dependencies]
+client.workspace = true
+markings.workspace = true
+tauri = { version = "2", default-features = false, features = ["wry", "custom-protocol", "compression"] }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+identity.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", default-features = false }
+
+[lints]
+workspace = true

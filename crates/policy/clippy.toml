@@ -1,0 +1,28 @@
+# Pure crate (architecture §3.1): no I/O, no clock, no randomness, no crypto.
+# Clippy reads the nearest clippy.toml, so this file replaces the workspace one here.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+disallowed-types = [
+    { path = "std::time::SystemTime", reason = "pure crate: time enters as a value" },
+    { path = "std::time::Instant", reason = "pure crate: time enters as a value" },
+    { path = "std::fs::File", reason = "pure crate: no I/O" },
+    { path = "std::fs::OpenOptions", reason = "pure crate: no I/O" },
+    { path = "std::net::TcpStream", reason = "pure crate: no I/O" },
+    { path = "std::net::TcpListener", reason = "pure crate: no I/O" },
+    { path = "std::net::UdpSocket", reason = "pure crate: no I/O" },
+    { path = "std::process::Command", reason = "pure crate: no I/O" },
+    { path = "std::collections::hash_map::RandomState", reason = "pure crate: no randomness" },
+    { path = "std::collections::HashMap", reason = "pure crate: iteration order is random; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "pure crate: iteration order is random; use BTreeSet" },
+]
+disallowed-methods = [
+    { path = "std::fs::read", reason = "pure crate: no I/O" },
+    { path = "std::fs::read_to_string", reason = "pure crate: no I/O" },
+    { path = "std::fs::write", reason = "pure crate: no I/O" },
+    { path = "std::env::var", reason = "pure crate: no environment" },
+    { path = "std::env::vars", reason = "pure crate: no environment" },
+    { path = "std::env::args", reason = "pure crate: no environment" },
+    { path = "std::io::stdin", reason = "pure crate: no I/O" },
+    { path = "std::io::stdout", reason = "pure crate: no I/O" },
+    { path = "std::thread::spawn", reason = "pure crate: deterministic" },
+]

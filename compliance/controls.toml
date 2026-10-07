@@ -1,0 +1,174 @@
+# Source for oscal/component-definition.json. `cargo xtask oscal` refuses to run if a
+# path, symbol or test named here doesn't exist, then rewrites the JSON.
+#
+# code:  "path" or "path#symbol" (symbol must appear in the file, as plain text)
+# tests: "package::test::path", exactly as `cargo test -p package -- --list` prints it
+# One row per (component, control). Scripts under scripts/ are evidence, not tests the
+# xtask can list; they go in `code`.
+
+[meta]
+title = "GARBLE"
+# Bump by hand when a statement changes; the output carries no wall-clock time.
+last_modified = "2026-10-06T00:00:00Z"
+oscal_version = "1.2.3"
+catalog = "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json"
+
+[components.ds]
+title = "GARBLE delivery service"
+description = "Sequences MLS messages and handshakes, runs the shared policy on every one, and logs each decision. Operators run it; they aren't room members."
+
+[components.cli]
+title = "GARBLE client (garble-cli and the desktop console)"
+description = "Holds the member's keys. Re-runs the room policy on everything it receives and on everything it is about to send, so a hostile DS can't make it accept or emit a policy violation."
+
+[components.log]
+title = "GARBLE transparency log"
+description = "RFC 6962 Merkle log in the C2SP tlog-tiles layout, with an ML-DSA-87 signed checkpoint after every DS request."
+
+[components.custodian]
+title = "GARBLE records custodian"
+description = "Pulls the sealed archive copy of every message into an append-only store. Holds no private key; opens a record only against a DS-logged permit."
+
+# AC-3(3): mandatory access control
+
+[[row]]
+control = "ac-3.3"
+component = "ds"
+responsibility = "provided"
+statement = """
+Access to rooms and to the audit log is decided by one pure function, policy::decide, from the \
+subject's issuer-signed attributes and the object's marking. The DS runs it on room creation, \
+every add, every message and every log read; a subject whose clearance doesn't dominate the \
+room ceiling (or the entry's marking) is denied, and the denial is logged. The rule is not \
+discretionary: no member or steward can grant access past what the attributes cover. Because \
+membership requires clearance for the ceiling and messages must sit within it, a member \
+cleared for the ceiling is cleared for every message in the room."""
+code = [
+  "crates/policy/src/lib.rs#pub fn decide",
+  "crates/markings/src/lattice.rs#pub fn dominates",
+  "crates/ds/src/main.rs#fn decided",
+]
+tests = [
+  "policy::tests::add_refuses_joiner_missing_a_compartment",
+  "policy::tests::raising_the_ceiling_needs_every_member_cleared",
+  "policy::tests::expired_attributes_deny_everything",
+  "policy::tests::log_entries_need_clearance_for_their_marking",
+  "markings::proptests::cleared_for_ceiling_implies_cleared_for_contents",
+  "ds::tests::entries_are_readable_only_by_the_cleared",
+]
+
+[[row]]
+control = "ac-3.3"
+component = "cli"
+responsibility = "provided"
+statement = """
+The client doesn't rely on the DS having enforced the policy. It decides with the same \
+function before it adds a member or sends, and an invitee refuses a room whose ceiling is \
+above its own clearance. A commit the DS sequenced against the rules freezes the room on that \
+client (integrity hold)."""
+code = [
+  "crates/identity/src/room.rs#fn check_message",
+  "crates/client/src/lib.rs#IntegrityHold",
+  "scripts/money-demo.sh",
+]
+tests = [
+  "policy::tests::invitee_refuses_a_room_above_its_clearance",
+  "policy::tests::send_checks_ceiling_then_sender",
+]
+
+# AC-4: information flow enforcement
+
+[[row]]
+control = "ac-4"
+component = "ds"
+responsibility = "provided"
+statement = """
+A message goes into a room only if its marking is within the room ceiling. The marking rides in \
+the MLS-authenticated data of every application message, so the DS reads it without reading \
+the content, refuses a message above the ceiling and logs the refusal with a reason code. \
+Entries about a room are readable only by users cleared for that room's marking."""
+code = [
+  "crates/policy/src/lib.rs#Action::Send",
+  "crates/markings/src/lattice.rs#pub fn within",
+  "crates/ds/src/main.rs#fn decided",
+]
+tests = [
+  "policy::tests::send_checks_ceiling_then_sender",
+  "markings::tests::within_room_ceilings",
+  "markings::proptests::within_is_sound_for_the_least_cleared_member",
+  "ds::tests::messages_are_logged_by_hash_and_rooms_stay_in_their_clearance",
+]
+
+[[row]]
+control = "ac-4"
+component = "cli"
+responsibility = "provided"
+statement = """
+Receivers check the same rule again: a message above the ceiling, or from a sender whose \
+credential doesn't cover its marking, is quarantined instead of shown. Forwarding between \
+rooms keeps the original marking, so a destination whose ceiling is lower refuses the message \
+and the refusal is logged. Attachments can't be forwarded between rooms yet (Q18)."""
+code = [
+  "crates/client/src/lib.rs#fn check_received",
+  "crates/client/src/lib.rs#pub fn forward",
+  "scripts/demo.sh",
+]
+tests = [
+  "policy::tests::send_checks_ceiling_then_sender",
+  "client::files::tests::a_file_message_must_agree_with_its_signed_header",
+]
+
+# AU-10: non-repudiation
+
+[[row]]
+control = "au-10"
+component = "log"
+responsibility = "provided"
+statement = """
+Every decision, permit or deny, is a leaf in an append-only Merkle log. After each request the \
+DS signs a checkpoint with its ML-DSA-87 log key. A client keeps the last checkpoint it \
+accepted and refuses one that isn't signed by the trusted key or doesn't extend it, then stops \
+sending. `garble log verify` proves each readable entry is in the signed tree. No witnesses or \
+cosignatures yet, and the first checkpoint is trusted on first use."""
+code = [
+  "crates/tlog/src/proof.rs#pub fn verify_inclusion",
+  "crates/tlog/src/proof.rs#pub fn verify_consistency",
+  "crates/tlog/src/note.rs#pub fn sign_checkpoint",
+  "crates/tlog/src/note.rs#pub fn open_checkpoint",
+  "crates/client/src/audit.rs#pub fn verify_log",
+]
+tests = [
+  "tlog::tests::matches_the_certificate_transparency_vectors",
+  "tlog::tests::proofs_verify_and_tampering_fails",
+  "tlog::note::tests::tampering_and_wrong_keys_fail",
+  "identity::log::tests::ml_dsa_checkpoints_verify_and_reject_other_keys",
+  "client::audit::tests::rewritten_history_is_refused",
+  "client::audit::tests::a_shorter_log_is_refused",
+  "ds::tests::proofs_and_tiles_match_the_signed_checkpoints",
+  "ds::tests::no_route_deletes_or_rewrites_anything",
+]
+
+[[row]]
+control = "au-10"
+component = "custodian"
+responsibility = "hybrid"
+statement = """
+Each message is MLS-signed by its sender, and the sender's copy is sealed to the custodian's \
+ML-KEM-1024 key with its hash bound into the signed data and the log entry. Opening the \
+archive needs a DS-logged ReadArchive permit for a listed records officer. Hybrid: the \
+procedure is enforced by the custodian binary, not by cryptography, so the key holder can \
+bypass it (Q16), and a sender can seal a copy that differs from what members got (Q17)."""
+code = [
+  "crates/identity/src/archive.rs#pub fn seal_archive",
+  "crates/custodian/src/lib.rs#pub fn verify_permit",
+  "crates/policy/src/lib.rs#Action::ReadArchive",
+  "scripts/archive-demo.sh",
+]
+tests = [
+  "policy::tests::archive_reads_need_a_cleared_records_officer",
+  "identity::archive::tests::only_the_private_key_opens_a_copy_and_only_for_its_room",
+  "identity::archive::tests::a_tampered_copy_is_refused",
+  "custodian::tests::a_permit_opens_once",
+  "custodian::tests::a_permit_has_to_be_in_a_log_the_bundle_trusts",
+  "ds::tests::files_and_the_archive_go_through_the_ds_and_open_only_with_a_logged_permit",
+]

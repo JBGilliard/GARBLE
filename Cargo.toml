@@ -1,0 +1,39 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+rust-version = "1.91"
+
+[workspace.dependencies]
+markings = { path = "crates/markings" }
+policy = { path = "crates/policy" }
+proto = { path = "crates/proto" }
+identity = { path = "crates/identity" }
+tlog = { path = "crates/tlog" }
+client = { path = "crates/client" }
+custodian = { path = "crates/custodian" }
+
+openmls = { version = "0.9", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_libcrux_crypto = { version = "0.4", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_traits = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+openmls_rust_crypto = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+ureq = { version = "3", default-features = false, features = ["json"] }
+tiny_http = "0.12"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

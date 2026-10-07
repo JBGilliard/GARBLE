@@ -1,0 +1,21 @@
+[package]
+name = "markings"
+description = "CAPCO classification markings: parse, render, compare, aggregate. Pure: no I/O, clock, randomness or crypto."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Sample SCI/SAR/country/CUI registers for tests and the demo. Never in production builds:
+# production registers come from the signed trust bundle (architecture §4.3).
+sample-registers = []
+
+[dependencies]
+# None, on purpose (architecture §3.1). `xtask check-deps` enforces it.
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

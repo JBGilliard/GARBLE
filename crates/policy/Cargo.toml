@@ -1,0 +1,16 @@
+[package]
+name = "policy"
+description = "The only place GARBLE access decisions are made: pure decide(subject, resource, action). No I/O, clock, randomness or crypto."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+markings.workspace = true
+
+[dev-dependencies]
+markings = { workspace = true, features = ["sample-registers"] }
+
+[lints]
+workspace = true

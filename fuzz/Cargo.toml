@@ -1,0 +1,39 @@
+[package]
+name = "garble-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Not a workspace member: needs nightly, and libfuzzer-sys must stay out of the main lockfile.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+markings = { path = "../crates/markings", features = ["sample-registers"] }
+proto = { path = "../crates/proto" }
+serde = "1"
+serde_json = "1"
+
+[[bin]]
+name = "marking_parse"
+path = "fuzz_targets/marking_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "marking_canonical"
+path = "fuzz_targets/marking_canonical.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire_decode"
+path = "fuzz_targets/wire_decode.rs"
+test = false
+doc = false
+bench = false

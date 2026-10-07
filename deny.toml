@@ -1,0 +1,49 @@
+# cargo-deny config. Architecture §3.1 dependency rules are split across three checks:
+#   * here: only identity/client/ds may depend on openmls directly;
+#   * `cargo xtask check-deps`: markings and policy have no dependency closure beyond
+#     what §3.1 allows (cargo-deny can't express per-crate closures);
+#   * crates/{markings,policy}/clippy.toml: no I/O, clock, randomness or env APIs.
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Unmaintained compile-time proc macro, reached only via libcrux's hax-lib macros.
+    # No runtime code. Tracked in docs/open-questions.md (Q6).
+    { id = "RUSTSEC-2026-0173", reason = "build-time proc macro under libcrux; no safe upgrade yet" },
+    # Linux-only: gtk-rs 0.18 under Tauri's webview. Compile-time only. Tracked in Q15.
+    { id = "RUSTSEC-2024-0370", reason = "build-time proc macro under tauri's gtk3 stack; no safe upgrade yet" },
+]
+
+[licenses]
+version = 2
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Zlib",
+    "Unicode-3.0",
+]
+private = { ignore = true }
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+deny = [
+    { crate = "openmls", wrappers = ["identity", "client", "ds"], reason = "§3.1: only identity, client and ds use OpenMLS" },
+    { crate = "openmls_libcrux_crypto", wrappers = ["client", "ds"], reason = "§3.1: crypto provider is chosen by client and ds" },
+    { crate = "openssl", reason = "crypto goes through the OpenMLS provider (libcrux; aws-lc under `fips`)" },
+    { crate = "openssl-sys", reason = "crypto goes through the OpenMLS provider (libcrux; aws-lc under `fips`)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

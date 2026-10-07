@@ -1,0 +1,24 @@
+[package]
+name = "client"
+description = "Everything a GARBLE client does: MLS groups, sync, encrypted local store, search, files, purge, banners."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+identity.workspace = true
+policy.workspace = true
+proto.workspace = true
+markings.workspace = true
+tlog.workspace = true
+openmls.workspace = true
+openmls_traits.workspace = true
+openmls_rust_crypto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

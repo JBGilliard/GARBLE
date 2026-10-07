@@ -1,0 +1,24 @@
+[package]
+name = "identity"
+description = "Enrollment, attribute credentials, trust bundle; turns signed bytes into a verified policy::Subject."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+proto.workspace = true
+policy.workspace = true
+tlog.workspace = true
+# ponytail: sample registers until the signed trust bundle carries real ones (§4.3).
+markings = { workspace = true, features = ["sample-registers"] }
+openmls.workspace = true
+openmls_traits.workspace = true
+openmls_rust_crypto.workspace = true
+openmls_basic_credential.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

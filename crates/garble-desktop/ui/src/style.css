@@ -1,0 +1,193 @@
+:root {
+  --bg: #12151c;
+  --panel: #181c25;
+  --line: #2a303c;
+  --text: #dfe3ea;
+  --muted: #8b93a3;
+  --ok: #4cc38a;
+  --bad: #ff6b6b;
+  --warn: #f0b429;
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+button, input, textarea { font: inherit; color: inherit; }
+input, textarea {
+  background: #0e1117;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 6px 8px;
+}
+input:focus, textarea:focus { outline: 1px solid #5b8def; border-color: #5b8def; }
+button {
+  background: #232a37;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 5px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: #2c3546; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.plain { background: none; border: none; color: var(--muted); padding: 2px 6px; text-decoration: underline; }
+[hidden] { display: none !important; }
+.muted { color: var(--muted); }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+
+/* Classification banners: background and text color come from the core. */
+.banner {
+  background: var(--bg, #3a3f4b);
+  color: var(--fg, #fff);
+  text-align: center;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  padding: 3px 8px;
+  font-size: 12px;
+  text-transform: uppercase;
+  user-select: none;
+}
+.banner.fault { animation: blink 1s steps(2) infinite; }
+@keyframes blink { 50% { opacity: 0.55; } }
+
+.integrity {
+  background: #5a0f18;
+  color: #fff;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-bottom: 2px solid var(--bad);
+}
+
+#app {
+  display: grid;
+  grid-template-columns: 240px 1fr auto;
+  flex: 1;
+  min-height: 0;
+}
+
+#rooms {
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#rooms h1 { font-size: 15px; letter-spacing: 0.2em; margin: 0 0 4px; color: var(--muted); }
+#rooms ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+button.room {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  text-align: left;
+  background: transparent;
+  border-color: transparent;
+}
+button.room.on { background: #232a37; border-color: var(--line); }
+.room-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.new-room { display: flex; flex-direction: column; gap: 4px; margin-top: auto; }
+
+.chip {
+  display: inline-block;
+  background: var(--bg);
+  color: var(--fg);
+  font: 700 11px/1 ui-monospace, Menlo, monospace;
+  padding: 3px 5px;
+  border-radius: 3px;
+  white-space: nowrap;
+  max-width: 14em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+}
+.badge { background: #5b8def; color: #fff; border-radius: 9px; font-size: 11px; padding: 0 6px; }
+.tag { font-size: 11px; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; color: var(--muted); }
+.tag.bad { color: var(--bad); border-color: var(--bad); }
+
+#room { display: grid; grid-template-rows: auto 1fr auto; min-width: 0; min-height: 0; }
+.room-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.room-head .title { display: flex; align-items: center; gap: 8px; }
+.room-head .members { color: var(--muted); flex: 1; min-width: 12em; }
+.member-controls { display: flex; gap: 4px; }
+.member-controls input { width: 9em; }
+
+.messages { overflow-y: auto; padding: 10px 14px; display: flex; flex-direction: column; gap: 6px; }
+.empty { display: grid; place-items: center; color: var(--muted); }
+.msg { padding: 6px 10px; border-radius: 6px; background: var(--panel); border: 1px solid var(--line); max-width: 46em; }
+.msg.mine { align-self: flex-end; background: #1c2538; }
+.msg .meta { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.msg .sender { font-weight: 600; }
+.msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.msg.notice { align-self: center; background: none; border: none; color: var(--muted); font-size: 12px; }
+.msg.ack { align-self: flex-start; background: none; border-style: dashed; font-size: 13px; }
+.msg.quarantined {
+  background: repeating-linear-gradient(135deg, #2a1418, #2a1418 10px, #321a1f 10px, #321a1f 20px);
+  border-color: var(--bad);
+}
+.older { align-self: center; }
+
+.composer { border-top: 1px solid var(--line); padding: 8px 14px; display: flex; flex-direction: column; gap: 6px; background: var(--panel); }
+.marking-row { display: flex; align-items: center; gap: 10px; }
+.marking-input { width: 22em; font-family: ui-monospace, Menlo, monospace; }
+.verdict { display: flex; align-items: center; gap: 8px; min-height: 22px; color: var(--muted); font-size: 13px; }
+.verdict.permit span { color: var(--ok); }
+.verdict.deny span { color: var(--warn); }
+.verdict.invalid span { color: var(--bad); }
+.body-row { display: flex; gap: 8px; align-items: stretch; }
+.body-input { flex: 1; resize: vertical; min-height: 44px; max-height: 200px; }
+button.send { min-width: 8em; }
+
+#inspector {
+  width: 380px;
+  border-left: 1px solid var(--line);
+  background: var(--panel);
+  padding: 10px 12px;
+  overflow-y: auto;
+}
+.inspector-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.denial-list { display: flex; flex-direction: column; gap: 2px; max-height: 30%; overflow-y: auto; margin-bottom: 10px; }
+button.denial-row { text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: none; border-color: transparent; }
+button.denial-row.on { background: #232a37; border-color: var(--line); }
+.denial-detail table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+.denial-detail th { text-align: left; color: var(--muted); font-weight: 400; vertical-align: top; padding: 2px 8px 2px 0; white-space: nowrap; }
+.denial-detail td { overflow-wrap: anywhere; padding: 2px 0; font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+.proof p { margin: 6px 0; }
+
+#status {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  padding: 3px 12px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  font-size: 12px;
+  color: var(--muted);
+}
+#status .note { margin-left: auto; color: var(--text); }
+
+/* The tile is set from script; this just has to sit on top of everything and let clicks through. */
+#watermark {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1000;
+  background-repeat: repeat;
+}
