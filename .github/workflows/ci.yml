@@ -77,11 +77,13 @@ jobs:
       - name: fuzz (60s per target)
         working-directory: fuzz
         # Seeds are copied in because a corpus dir passed after `--` becomes the output dir.
+        # --target: the prebuilt cargo-fuzz is a musl binary and defaults to its own triple,
+        # which ASan refuses (static libc).
         run: |
           for t in marking_parse marking_canonical wire_decode; do
             mkdir -p corpus/$t
             cp seeds/$t/* corpus/$t/
-            rustup run nightly cargo fuzz run $t -- -max_total_time=60
+            rustup run nightly cargo fuzz run $t --target x86_64-unknown-linux-gnu -- -max_total_time=60
           done
       - uses: actions/upload-artifact@v4
         if: failure()
