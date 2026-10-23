@@ -6,12 +6,14 @@ Design problems found while building. `docs/architecture.md` is unchanged; each 
 
 `openmls_libcrux_crypto` 0.4.0 on crates.io rejects 0x0907: `supports()` accepts only Ed25519 signatures. The ML-DSA support that §11.1 found is on `main` only (see `docs/spike-results.md`). That contradicts the locked "libcrux provider first".
 
-- **Now:** the pin is in place as instructed (`openmls_libcrux_crypto = "0.4"`, PQ feature on), and `client` and `ds` depend on it, but nothing uses it yet. The spike ran on `openmls_rust_crypto` 0.6.0, which accepts 0x0907. That provider uses the RustCrypto `ml-dsa` 0.1 crate and `hpke-rs-rust-crypto`: neither formally verified nor validated.
-- **Options:**
-  - (a) Use `openmls_rust_crypto` until libcrux ships a release.
-  - (b) Take openmls `main` as a git dependency. That conflicts with the "0.9" pin, and cargo-deny would need the git source allowed.
-  - (c) Write a small GARBLE `OpenMlsCrypto` provider over `libcrux-ml-dsa` and `libcrux-ml-kem` directly. That's the same work as the planned `fips` provider, just a different backend.
-- **Recommendation:** (a) for development and (c) before any pilot. Also ask OpenMLS when the next libcrux provider release is due.
+- **Now (v2.0):** option (c) is in `crates/crypto`, behind the `libcrux` feature (`--features crypto/libcrux`). `rustcrypto` is still the default, and CI runs every test and demo on both until it's dropped. A re-check at milestone start found `openmls_libcrux_crypto` still at 0.4.0, so we wrap it instead of waiting.
+  - **From libcrux:** SHA-384, HMAC-SHA-384, HKDF-SHA-384, AES-256-GCM, the HMAC-DRBG (seeded from the OS), and HPKE with ML-KEM-1024 (`hpke-rs-libcrux` over `libcrux-ml-kem`). All of that is upstream's `openmls_libcrux_crypto`.
+  - **Ours:** ML-DSA-87 over `libcrux-ml-dsa` 0.0.11 (keygen from a 32-byte seed, hedged signing, empty context), the single-suite allowlist, and `crypto::SignatureKeyPair`. `openmls_basic_credential` signs with RustCrypto's `ml-dsa` whatever the provider is, so it's banned and every signature goes through the provider.
+  - **Delegated to RustCrypto:** nothing. The provider answers `supports()` for 0x0907 only and refuses any other hash, AEAD, signature scheme or HPKE config. That also means `supported_ciphersuites()` is honest, unlike `openmls_rust_crypto`'s.
+  - **Not covered:** `tlog` hashes its Merkle tree with its own SHA-256, outside the provider. libcrux is formally verified in parts, not validated (no CMVP), and its ML-DSA had FIPS 204 bugs fixed in March 2026.
+  - **Checked against RustCrypto's independent ML-DSA, ML-KEM, SHA-2 and AES-GCM** (`crates/crypto/src/tests.rs`): keys derived from the same seed or ikm match, signatures and HPKE ciphertexts cross-verify and cross-open, and corrupted inputs are rejected by both. **Not done:** NIST ACVP vectors in CI (the architecture's mitigation); the differential tests are not a substitute.
+  - **Private HPKE keys aren't portable between providers.** The public key and ciphertexts are identical, but libcrux keeps the 3168-byte decapsulation key where RustCrypto keeps a 64-byte seed. A custodian archive key or a stored MLS group made under one provider won't open under the other. ML-DSA keys are the same 32-byte seed in both, so signing key files do move. v2.0 resets all client state anyway, but don't flip the provider under a live deployment.
+  - **Advisories:** `libcrux-kem` 0.0.9 and `libcrux-hmac-drbg` 0.0.1 carry RUSTSEC-2026-0329/0330/0331, and upstream pins them exactly. They're ignored in `deny.toml` with tests behind each reason. Drop the ignores when `openmls_libcrux_crypto` moves to `hpke-rs` 0.8.
 - A related gotcha: `openmls_rust_crypto` accepts 0x0907 in `supports()` but leaves it out of `supported_ciphersuites()`. Never negotiate suites from that list. Use the single `CIPHERSUITE` constant.
 
 ## Q2. DS-proposed Removes must reach every member, not just the custodian
@@ -104,7 +106,7 @@ Strict validation requires every SCI and SAR sub-compartment to be in the regist
 
 - **The marking is not at risk.** The forwarder's own `Send` check runs against the destination's ceiling, and receivers re-run it. The claim at risk is attribution.
 - **Fix when it matters:** carry the original MLS message (or the sender's signature over the envelope) inside the forward. It's bigger and leaks the source room's epoch; the reserved `cosignatures` slot is the other route.
-- **Related:** clients keep sent and received text in `state.json` (plaintext, like the MLS dump) so `ack` and `forward` can refer back to it. SQLCipher replaces it.
+- **Related:** clients keep sent and received text in their SQLCipher store so `ack` and `forward` can refer back to it. Purge deletes it with the room.
 
 ## Q15. The desktop app's dependency tree and what it doesn't do yet
 
@@ -123,12 +125,13 @@ The custodian opens an archive only against a DS-logged `ReadArchive` permit (a 
 - **Fix:** two-person integrity on archive reads: split the key (or run a threshold KEM) so opening needs two officers' shares, and have the shares check the permit. That also covers the "no standing key" rule in `idea-v1` §1, which today is met only in the sense that the custodian binary holds no key at rest.
 - **Related:** the custodian trusts the DS for completeness. A DS that withholds an archive entry isn't noticed. Cross-checking against the `archive` hash on each message's log entry needs the custodian cleared to read the log.
 
-## Q17. A malicious sender can archive a copy that differs from what members received
+## Q17. A malicious sender can archive a copy that differs from what members received *(closed in v2.0)*
 
-The sender seals the archive copy, and nothing lets anyone else see inside it. The copy's SHA-384 is in the MLS-signed `AppAad` and in the message's log entry, so it's bound to *that message*, but the DS can't open it, members can't compare it, and the custodian can't see the real message. A sender can archive different text, a different marking, or garbage; the custodian reports a copy that doesn't open instead of skipping it, but a well-formed lie opens fine.
+The sender seals the archive copy, and the DS can't open it. Before v2.0 nothing tied what was inside to the message members received, so a sender could archive different text, a different marking, or garbage.
 
-- **Not at risk:** what members received, and the log. The marking policy runs on the MLS message, not the copy.
-- **Fix, cheapest first:** put a hash of the envelope in `AppAad` (the random `msg_id` inside it makes the hash safe to expose) and have receivers check it and the custodian check it on opening; or make the custodian an MLS member so it sees the same ciphertext (the architecture's original design, §5.9).
+- **Now:** `AppAad.envelope` is the SHA-384 of the canonical envelope, signed by the sender inside the MLS message. Receivers hash the envelope they decrypted and quarantine on a mismatch (`RoomRules::check_envelope`). The DS refuses a message whose hash isn't 48 bytes (`R-001`), records it in the log entry, and hands it to the custodian with the sealed copy. The custodian hashes the envelope it opens and reports a mismatch as unreadable, like any other bad copy. The random `msg_id` inside the envelope keeps the exposed hash from confirming a guess at the text.
+- **Still the sender's word:** `marking`, `sent_at` and `sender` in the archive record. The marking in the AAD is policy-checked and goes to the log, but nothing compares it to the copy's. Only the envelope is bound.
+- **Trusts the DS for the hash:** the custodian gets it from the DS, not from the MLS message. A DS that swaps it can hide a lie or fake one; the logged copy of the hash is how that gets noticed, once the custodian can read the log (see Q16).
 - **Related:** a copy is sealed before its message is sent. If the send is then refused, the sealed copy stays in DS memory and is never archived; the custodian only ever receives copies tied to a sequenced message.
 
 ## Q18. Attachments: limits and what isn't built

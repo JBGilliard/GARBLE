@@ -14,8 +14,7 @@ tlog.workspace = true
 markings = { workspace = true, features = ["sample-registers"] }
 openmls.workspace = true
 openmls_traits.workspace = true
-openmls_rust_crypto.workspace = true
-openmls_basic_credential.workspace = true
+crypto.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

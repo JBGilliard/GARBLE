@@ -8,23 +8,43 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Every test and demo runs on both crypto providers until RustCrypto is dropped (Q1).
   check:
+    name: check (${{ matrix.provider }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - provider: rustcrypto
+            cargo_flags: ""
+          - provider: libcrux
+            cargo_flags: "--features crypto/libcrux"
+    env:
+      # Read by the crypto tests: a leg that built the wrong provider fails instead of
+      # quietly testing RustCrypto twice. The demo scripts pass CARGO_FLAGS to cargo build.
+      GARBLE_EXPECT_PROVIDER: ${{ matrix.provider }}
+      CARGO_FLAGS: ${{ matrix.cargo_flags }}
     steps:
       - uses: actions/checkout@v4
       # Toolchain version and components come from rust-toolchain.toml.
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.provider }}
       - name: fmt
+        if: matrix.provider == 'rustcrypto'
         run: cargo fmt --all --check
       # garble-desktop needs webkit2gtk and a built UI; it has its own job below.
       - name: clippy
-        run: cargo clippy --workspace --exclude garble-desktop --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude garble-desktop --all-targets --locked $CARGO_FLAGS -- -D warnings
       - name: test
-        run: cargo test --workspace --exclude garble-desktop --locked
+        run: cargo test --workspace --exclude garble-desktop --locked $CARGO_FLAGS
       - name: dependency rules (§3.1)
+        if: matrix.provider == 'rustcrypto'
         run: cargo xtask check-deps
       - name: control map (fails on a missing path or test; output must be committed)
+        if: matrix.provider == 'rustcrypto'
         run: |
           cargo xtask oscal
           git diff --exit-code oscal

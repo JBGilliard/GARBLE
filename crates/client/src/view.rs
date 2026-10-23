@@ -138,6 +138,7 @@ impl<K: KeyStore> Client<K> {
             sent_at: now(),
             blobs: vec![],
             archive: None,
+            envelope: Bytes(vec![]),
         };
         let (_, d) = rules.check_message(
             &self.trust,

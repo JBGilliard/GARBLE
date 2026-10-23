@@ -19,7 +19,8 @@ pub use error::{Error, Result};
 pub use hash::{Hash, empty_root, leaf_hash, node_hash};
 pub use log::Log;
 pub use note::{
-    Checkpoint, SIG_TYPE_ML_DSA_87, Signer, Verifier, key_id, open_checkpoint, sign_checkpoint,
+    Checkpoint, SIG_TYPE_ML_DSA_87, Signer, Verifier, key_id, open_checkpoint, peek_checkpoint,
+    sign_checkpoint,
 };
 pub use proof::{verify_consistency, verify_inclusion};
 pub use tile::{

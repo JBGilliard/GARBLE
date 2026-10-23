@@ -98,7 +98,32 @@ impl<S: TileStore> Log<S> {
             origin: origin.into(),
             size: self.size,
             root: self.root(),
+            closed: false,
         }
+    }
+
+    /// The root rebuilt from the entries themselves, for a log being audited rather than
+    /// served: `open` trusts the hash tiles to agree with the entry bundles.
+    pub fn recompute_root(&self) -> Result<Hash> {
+        let mut stack: Vec<(u32, Hash)> = Vec::new();
+        for start in (0..self.size).step_by(TILE_WIDTH as usize) {
+            for entry in self.entries(start, (start + TILE_WIDTH).min(self.size))? {
+                let mut node = (0u32, leaf_hash(&entry));
+                while let Some(&(level, left)) = stack.last() {
+                    if level != node.0 {
+                        break;
+                    }
+                    stack.pop();
+                    node = (level + 1, node_hash(&left, &node.1));
+                }
+                stack.push(node);
+            }
+        }
+        let mut it = stack.iter().rev();
+        let Some((_, last)) = it.next() else {
+            return Ok(empty_root());
+        };
+        Ok(it.fold(*last, |acc, (_, h)| node_hash(h, &acc)))
     }
 
     /// Append `entry`; returns its index and leaf hash.

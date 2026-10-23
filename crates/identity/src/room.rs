@@ -39,7 +39,7 @@ pub fn user_of(c: &Credential) -> Result<String> {
 pub fn attributes_extension(cred: &AttributeCredential) -> Result<Extensions<LeafNode>> {
     Ok(Extensions::single(Extension::Unknown(
         ATTRIBUTES_EXT,
-        UnknownExtension(serde_json::to_vec(cred)?),
+        UnknownExtension(proto::encode(cred)?),
     ))?)
 }
 
@@ -59,7 +59,7 @@ pub fn leaf_identity(leaf: &LeafNode) -> Result<LeafIdentity> {
         .extensions()
         .unknown(ATTRIBUTES_EXT)
         .with_context(|| format!("{user}'s leaf carries no attributes"))?;
-    let attributes: AttributeCredential = serde_json::from_slice(&ext.0)?;
+    let attributes: AttributeCredential = proto::decode(&ext.0)?;
     ensure!(
         attributes.body.user == user,
         "leaf attributes are for {}",
@@ -154,7 +154,7 @@ impl RoomRules {
         let ext = ext
             .unknown(ROOM_POLICY_EXT)
             .context("room has no policy extension")?;
-        let p: RoomPolicy = serde_json::from_slice(&ext.0)?;
+        let p: RoomPolicy = proto::decode(&ext.0)?;
         ensure!(p.v == WIRE_VERSION, "room policy version {}", p.v);
         let registers = trust.registers();
         let ceiling = Marking::from_canonical(&p.ceiling.0, &registers)?;
@@ -206,7 +206,7 @@ impl RoomRules {
         if view.added.is_empty() && view.removed.is_empty() && view.new_rules.is_none() {
             return Ok(Decision::Permit);
         }
-        let aad: HandshakeAad = serde_json::from_slice(aad).context("handshake AAD")?;
+        let aad: HandshakeAad = proto::decode(aad).context("handshake AAD")?;
         ensure!(aad.v == WIRE_VERSION, "handshake AAD version {}", aad.v);
         ensure!(
             aad.decided_at.abs_diff(now) <= MAX_SKEW_SECS,
@@ -261,6 +261,17 @@ impl RoomRules {
         markings::dominates(&s.clearance, &self.ceiling, &self.registers).is_ok()
     }
 
+    /// Does the decrypted `envelope` (canonical bytes, as received) match the hash the
+    /// sender signed into the AAD? Separate from `check_message`: the DS never sees an
+    /// envelope, and a composer preview doesn't have one yet.
+    pub fn check_envelope(aad: &AppAad, envelope: &[u8]) -> Result<()> {
+        ensure!(
+            crate::archive::sha384(envelope)? == aad.envelope.0,
+            "envelope doesn't match the hash in its AAD"
+        );
+        Ok(())
+    }
+
     /// An application message: its AAD and the sender's attribute credential.
     pub fn check_message(
         &self,
@@ -289,5 +300,60 @@ impl RoomRules {
             &Action::Send { marking: &marking },
         );
         Ok((marking, d))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use proto::{Bytes, Envelope, Precedence, TEXT_PLAIN};
+
+    use super::*;
+
+    fn envelope(body: &str) -> Envelope {
+        Envelope {
+            v: WIRE_VERSION,
+            msg_id: Bytes(vec![7; 16]),
+            content_type: TEXT_PLAIN.into(),
+            precedence: Precedence::Routine,
+            body: Bytes(body.into()),
+            reply_to: None,
+            audience: vec![],
+            cosignatures: vec![],
+            forwarded_from: None,
+        }
+    }
+
+    fn aad_for(e: &Envelope) -> AppAad {
+        AppAad {
+            v: WIRE_VERSION,
+            sender: "alice".into(),
+            marking: Bytes(vec![1]),
+            sent_at: 0,
+            blobs: vec![],
+            archive: None,
+            envelope: Bytes(crate::archive::envelope_hash(e).unwrap()),
+        }
+    }
+
+    #[test]
+    fn a_receiver_holds_the_envelope_to_the_hash_in_the_aad() {
+        let sent = envelope("hello");
+        let aad = aad_for(&sent);
+        let bytes = proto::encode(&sent).unwrap();
+        RoomRules::check_envelope(&aad, &bytes).unwrap();
+
+        // Different text, and a different msg_id: neither passes for the signed one.
+        let other = proto::encode(&envelope("goodbye")).unwrap();
+        assert!(RoomRules::check_envelope(&aad, &other).is_err());
+        let mut reid = sent.clone();
+        reid.msg_id = Bytes(vec![8; 16]);
+        assert!(RoomRules::check_envelope(&aad, &proto::encode(&reid).unwrap()).is_err());
+
+        // An AAD that never committed to an envelope matches nothing.
+        let bare = AppAad {
+            envelope: Bytes(vec![]),
+            ..aad
+        };
+        assert!(RoomRules::check_envelope(&bare, &bytes).is_err());
     }
 }

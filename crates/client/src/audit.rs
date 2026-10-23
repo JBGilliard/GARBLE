@@ -50,6 +50,14 @@ pub(crate) fn check_advance(
     new: &Checkpoint,
     proof: &[Hash],
 ) -> Result<(), String> {
+    // A DS that's serving doesn't hand out a sealed head; one that does is lying about
+    // being finished, and a later "extension" of it would otherwise pass silently.
+    if new.closed {
+        return Err(format!(
+            "log was sealed at {} entries but is still being served",
+            new.size
+        ));
+    }
     let Some(old) = old else { return Ok(()) };
     if new.size < old.size {
         return Err(format!(
@@ -234,6 +242,17 @@ mod tests {
         fork.append(b"more").unwrap();
         let proof = fork.consistency_proof(3, 4).unwrap();
         assert!(check_advance(Some(&head(&a)), &head(&fork), &proof).is_err());
+    }
+
+    #[test]
+    fn a_sealed_head_is_never_accepted_from_a_live_ds() {
+        let a = log(3);
+        let sealed = Checkpoint {
+            closed: true,
+            ..head(&a)
+        };
+        assert!(check_advance(None, &sealed, &[]).is_err());
+        assert!(check_advance(Some(&head(&a)), &sealed, &[]).is_err());
     }
 
     #[test]

@@ -14,7 +14,8 @@
 #                        nobody can send; a steward closes the room.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-cargo build -q -p ds -p garble-cli
+# CARGO_FLAGS: extra cargo args, e.g. `--features crypto/libcrux` (CI runs every demo on both providers).
+cargo build -q -p ds -p garble-cli ${CARGO_FLAGS:-}
 G=target/debug/garble
 D=target/money-demo
 rm -rf "$D" && mkdir -p "$D"

@@ -47,13 +47,20 @@ pub struct Checkpoint {
     pub origin: String,
     pub size: u64,
     pub root: Hash,
+    /// The operator closed this log: nothing is appended after it. Carried as a fourth
+    /// text line, `closed`, the one extension line this format accepts.
+    pub closed: bool,
 }
 
+/// The extension line of a closed log's final checkpoint.
+const CLOSED: &str = "closed";
+
 impl Checkpoint {
-    /// The signed text: origin, size, root, one per line.
+    /// The signed text: origin, size, root, one per line, then `closed` if it is.
     pub fn text(&self) -> String {
+        let closed = if self.closed { "closed\n" } else { "" };
         format!(
-            "{}\n{}\n{}\n",
+            "{}\n{}\n{}\n{closed}",
             self.origin,
             self.size,
             b64::encode(&self.root)
@@ -66,10 +73,19 @@ impl Checkpoint {
             .strip_suffix('\n')
             .ok_or_else(|| bad("no final newline"))?;
         let mut lines = body.split('\n');
-        let (Some(origin), Some(size), Some(root), None) =
-            (lines.next(), lines.next(), lines.next(), lines.next())
-        else {
+        let (Some(origin), Some(size), Some(root), ext, None) = (
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+            lines.next(),
+        ) else {
             return Err(bad("expected origin, size and root"));
+        };
+        let closed = match ext {
+            None => false,
+            Some(CLOSED) => true,
+            Some(_) => return Err(bad("unknown extension line")),
         };
         let size_n: u64 = size.parse().map_err(|_| bad("size is not a number"))?;
         if size_n.to_string() != size {
@@ -83,8 +99,19 @@ impl Checkpoint {
             origin: origin.into(),
             size: size_n,
             root,
+            closed,
         })
     }
+}
+
+/// The checkpoint text in `note` WITHOUT checking any signature. For telling an
+/// operator what kind of log directory they pointed at; never for trusting it.
+pub fn peek_checkpoint(note: &[u8]) -> Result<Checkpoint> {
+    let note = std::str::from_utf8(note).map_err(|_| Error::BadNote("not UTF-8".into()))?;
+    let split = note
+        .rfind("\n\n")
+        .ok_or_else(|| Error::BadNote("no signature block".into()))?;
+    Checkpoint::parse(&note[..=split])
 }
 
 fn check_origin(origin: &str) -> Result<()> {
@@ -208,6 +235,7 @@ mod tests {
             origin: "garble-ds".into(),
             size: 42,
             root: [7; 32],
+            closed: false,
         }
     }
 
@@ -297,5 +325,41 @@ mod tests {
             assert!(Checkpoint::parse(&bad).is_err(), "{bad:?}");
         }
         assert!(Checkpoint::parse(&format!("o\n1\n{root}\n")).is_ok());
+    }
+
+    #[test]
+    fn closed_is_signed_and_the_only_extension() {
+        let ds = Fake::new("garble-ds", b"k");
+        let sealed = Checkpoint {
+            closed: true,
+            ..cp()
+        };
+        let note = sign_checkpoint(&sealed, &ds).unwrap();
+        assert_eq!(open_checkpoint(&note, "garble-ds", &ds).unwrap(), sealed);
+        assert!(peek_checkpoint(&note).unwrap().closed);
+        assert!(
+            !peek_checkpoint(&sign_checkpoint(&cp(), &ds).unwrap())
+                .unwrap()
+                .closed
+        );
+
+        // Dropping the line or adding another one invalidates the signature or the parse.
+        let text = String::from_utf8(note).unwrap();
+        assert!(
+            open_checkpoint(
+                text.replacen("closed\n", "", 1).as_bytes(),
+                "garble-ds",
+                &ds
+            )
+            .is_err()
+        );
+        let root = b64::encode(&[1; 32]);
+        for bad in [
+            format!("o\n1\n{root}\nopen\n"),
+            format!("o\n1\n{root}\nclosed\nclosed\n"),
+            format!("o\n1\n{root}\n\n"),
+        ] {
+            assert!(Checkpoint::parse(&bad).is_err(), "{bad:?}");
+        }
     }
 }

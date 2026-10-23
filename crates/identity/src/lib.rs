@@ -11,9 +11,8 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
+use crypto::SignatureKeyPair;
 use markings::{Clearance, Country, Registers, parse};
-use openmls_basic_credential::SignatureKeyPair;
-use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{
     crypto::OpenMlsCrypto, random::OpenMlsRand, signatures::Signer, types::SignatureScheme,
 };
@@ -97,7 +96,7 @@ impl TrustBundle {
             "register version {}",
             b.register_version
         );
-        RustCrypto::default()
+        crypto::crypto()
             .verify_signature(SCHEME, &b.signed_bytes(), &self.issuer_key.0, &cred.sig.0)
             .map_err(|_| {
                 anyhow::anyhow!("attribute credential for {} has a bad signature", b.user)
@@ -115,7 +114,7 @@ impl TrustBundle {
 /// A fresh ML-KEM-1024 archive keypair `(private, public)`. The private half belongs
 /// offline with the custodian; nothing else in GARBLE ever holds it.
 pub fn generate_archive_keypair() -> Result<(Vec<u8>, Vec<u8>)> {
-    let crypto = RustCrypto::default();
+    let crypto = crypto::crypto();
     let ikm = crypto
         .random_vec(64)
         .map_err(|e| anyhow::anyhow!("rng: {e:?}"))?;
@@ -136,7 +135,7 @@ pub fn session_bytes(user: &str, nonce: &[u8]) -> Vec<u8> {
 }
 
 pub fn verify_session(key: &[u8], user: &str, nonce: &[u8], sig: &[u8]) -> Result<()> {
-    RustCrypto::default()
+    crypto::crypto()
         .verify_signature(SCHEME, &session_bytes(user, nonce), key, sig)
         .map_err(|_| anyhow::anyhow!("bad session signature for {user}"))
 }
@@ -148,10 +147,15 @@ pub trait KeyStore {
     /// The signing key, created on first use.
     fn signer(&self) -> Result<Self::Signer>;
     fn public_key(&self) -> Result<Vec<u8>>;
+    /// The 32 random bytes that unlock this device's SQLCipher file, created on first
+    /// use.
+    fn db_key(&self) -> Result<Vec<u8>>;
 }
 
 /// Development key store: the key pair in a JSON file.
-/// ponytail: plaintext on disk; OS keychain wrapping or an HSM before any pilot.
+/// ponytail: plaintext on disk; OS keychain wrapping or an HSM before any pilot. The
+/// DB key sits beside it in `<name>.dbkey`, so until then SQLCipher only buys
+/// protection from anyone who gets the DB file without the key file.
 pub struct FileKeyStore {
     path: std::path::PathBuf,
 }
@@ -176,6 +180,21 @@ impl KeyStore for FileKeyStore {
 
     fn public_key(&self) -> Result<Vec<u8>> {
         Ok(self.signer()?.to_public_vec())
+    }
+
+    fn db_key(&self) -> Result<Vec<u8>> {
+        let path = self.path.with_extension("dbkey");
+        if path.exists() {
+            let key: Bytes = serde_json::from_slice(&std::fs::read(&path)?)
+                .with_context(|| format!("{} is not a DB key", path.display()))?;
+            ensure!(key.0.len() == 32, "{} is not a 32-byte key", path.display());
+            return Ok(key.0);
+        }
+        let key = crypto::crypto()
+            .random_vec(32)
+            .map_err(|e| anyhow::anyhow!("rng: {e:?}"))?;
+        std::fs::write(&path, serde_json::to_vec(&Bytes(key.clone()))?)?;
+        Ok(key)
     }
 }
 

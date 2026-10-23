@@ -9,8 +9,8 @@ use std::process::{Command, ExitCode};
 
 /// Pure crates and the only normal (non-dev) dependencies their whole closure may contain.
 const PURE: &[(&str, &[&str])] = &[("markings", &[]), ("policy", &["markings"])];
-/// The only crates allowed to depend directly on `openmls*`.
-const OPENMLS_USERS: &[&str] = &["identity", "client", "ds"];
+/// The only crates allowed to depend directly on `openmls*`. `crypto` is the provider seam.
+const OPENMLS_USERS: &[&str] = &["crypto", "identity", "client", "ds"];
 const BINARIES: &[&str] = &["ds", "custodian", "garble-cli", "garble-desktop"];
 /// `tlog` hashes opaque leaves; it must not know GARBLE's types.
 const TLOG_FORBIDDEN: &[&str] = &["markings", "policy", "proto", "identity", "client"];

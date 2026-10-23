@@ -5,7 +5,8 @@
 #   * crates/{markings,policy}/clippy.toml: no I/O, clock, randomness or env APIs.
 
 [graph]
-all-features = false
+# Both crypto providers are in scope: the bans below must hold for either build.
+all-features = true
 
 [advisories]
 version = 2
@@ -14,6 +15,12 @@ ignore = [
     # Unmaintained compile-time proc macro, reached only via libcrux's hax-lib macros.
     # No runtime code. Tracked in docs/open-questions.md (Q6).
     { id = "RUSTSEC-2026-0173", reason = "build-time proc macro under libcrux; no safe upgrade yet" },
+    # libcrux provider (crypto/libcrux). hpke-rs-libcrux =0.7.0 and openmls_libcrux_crypto
+    # 0.4.0 pin these crates exactly, so no upgrade until upstream ships (hpke-rs 0.8).
+    # Drop all three then. Tests in crates/crypto pin that our paths error instead of panic.
+    { id = "RUSTSEC-2026-0329", reason = "libcrux-hmac-drbg 0.0.1: panic at output lengths that are multiples of 65536; GARBLE never asks for more than a few hundred bytes (crypto test random_survives_drbg_block_multiples)" },
+    { id = "RUSTSEC-2026-0330", reason = "libcrux-kem 0.0.9: hybrid-KEM panic; the provider refuses every HPKE config but ML-KEM-1024 before it reaches libcrux-kem" },
+    { id = "RUSTSEC-2026-0331", reason = "libcrux-kem 0.0.9: hybrid-KEM key decode panic; same allowlist, and malformed_kem_inputs_error_instead_of_panicking covers the ML-KEM-1024 decoders" },
     # Linux-only: gtk-rs 0.18 under Tauri's webview. Compile-time only. Tracked in Q15.
     { id = "RUSTSEC-2024-0370", reason = "build-time proc macro under tauri's gtk3 stack; no safe upgrade yet" },
 ]
@@ -39,9 +46,14 @@ wildcards = "deny"
 allow-wildcard-paths = true
 deny = [
     { crate = "openmls", wrappers = ["identity", "client", "ds"], reason = "§3.1: only identity, client and ds use OpenMLS" },
-    { crate = "openmls_libcrux_crypto", wrappers = ["client", "ds"], reason = "§3.1: crypto provider is chosen by client and ds" },
+    { crate = "openmls_rust_crypto", wrappers = ["crypto"], reason = "§3.1: the crypto provider is chosen in crates/crypto only" },
+    { crate = "openmls_libcrux_crypto", wrappers = ["crypto"], reason = "§3.1: the crypto provider is chosen in crates/crypto only" },
+    { crate = "libcrux-ml-dsa", wrappers = ["crypto"], reason = "§3.1: ML-DSA is called through the provider in crates/crypto only" },
+    { crate = "openmls_basic_credential", reason = "signs with RustCrypto's ML-DSA whatever provider is selected; use crypto::SignatureKeyPair" },
     { crate = "openssl", reason = "crypto goes through the OpenMLS provider (libcrux; aws-lc under `fips`)" },
-    { crate = "openssl-sys", reason = "crypto goes through the OpenMLS provider (libcrux; aws-lc under `fips`)" },
+    # SQLCipher's only crypto backend we can pin on every platform. It encrypts the
+    # client store at rest (SC-28(1)); message crypto never touches it.
+    { crate = "openssl-sys", wrappers = ["libsqlite3-sys"], reason = "crypto goes through the OpenMLS provider (libcrux; aws-lc under `fips`); the one exception is SQLCipher's at-rest AES via vendored OpenSSL" },
 ]
 
 [sources]

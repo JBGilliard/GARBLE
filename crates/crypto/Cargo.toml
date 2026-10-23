@@ -1,0 +1,39 @@
+[package]
+name = "crypto"
+description = "The one place GARBLE picks its OpenMLS crypto provider. Everyone else asks this crate."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["rustcrypto"]
+rustcrypto = ["dep:openmls_rust_crypto"]
+# Wins over `rustcrypto` when both are on, so CI can flip it with `--features crypto/libcrux`.
+libcrux = [
+    "dep:openmls_libcrux_crypto",
+    "dep:libcrux-ml-dsa",
+    "dep:hpke-rs-libcrux",
+    "dep:tls_codec",
+    "dep:openmls_memory_storage",
+]
+
+[dependencies]
+openmls_traits.workspace = true
+openmls_memory_storage = { workspace = true, optional = true }
+serde.workspace = true
+zeroize.workspace = true
+openmls_rust_crypto = { workspace = true, optional = true }
+openmls_libcrux_crypto = { workspace = true, optional = true }
+libcrux-ml-dsa = { workspace = true, optional = true }
+hpke-rs-libcrux = { workspace = true, optional = true }
+tls_codec = { version = "0.5", features = ["mls"], optional = true }
+
+[dev-dependencies]
+# Differential tests: the libcrux provider is checked against the RustCrypto one.
+openmls_rust_crypto.workspace = true
+proto.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

@@ -4,7 +4,6 @@
 //! Both sit on the same provider as the MLS suite, so they inherit its caveats (Q1).
 
 use anyhow::{Result, bail, ensure};
-use openmls_rust_crypto::RustCrypto;
 use openmls_traits::{
     crypto::OpenMlsCrypto,
     random::OpenMlsRand,
@@ -12,7 +11,7 @@ use openmls_traits::{
         AeadType, HashType, HpkeAeadType, HpkeCiphertext, HpkeConfig, HpkeKdfType, HpkeKemType,
     },
 };
-use proto::{ArchiveCopy, ArchiveRecord, Bytes, WIRE_VERSION};
+use proto::{ArchiveCopy, ArchiveRecord, Bytes, Envelope, WIRE_VERSION};
 
 /// The suite's own KEM, so the archive key is as post-quantum as the rooms are.
 pub(crate) const ARCHIVE_HPKE: HpkeConfig = HpkeConfig(
@@ -30,9 +29,14 @@ pub const FILE_KEY_LEN: usize = 32;
 pub const FILE_NONCE_LEN: usize = 12;
 
 pub fn sha384(data: &[u8]) -> Result<Vec<u8>> {
-    RustCrypto::default()
+    crypto::crypto()
         .hash(HashType::Sha2_384, data)
         .map_err(|e| anyhow::anyhow!("sha384: {e:?}"))
+}
+
+/// What `AppAad::envelope` must carry for `envelope`.
+pub fn envelope_hash(envelope: &Envelope) -> Result<Vec<u8>> {
+    sha384(&proto::encode(envelope)?)
 }
 
 /// Seal `record` to the custodian. Returns the [`ArchiveCopy`] bytes: what the DS
@@ -43,16 +47,16 @@ pub fn seal_archive(archive_key: &[u8], room: &str, record: &ArchiveRecord) -> R
         "record is for {}, not {room}",
         record.room
     );
-    let sealed = RustCrypto::default()
+    let sealed = crypto::crypto()
         .hpke_seal(
             ARCHIVE_HPKE,
             archive_key,
             room.as_bytes(),
             ARCHIVE_AAD,
-            &serde_json::to_vec(record)?,
+            &proto::encode(record)?,
         )
         .map_err(|e| anyhow::anyhow!("seal archive copy: {e:?}"))?;
-    Ok(serde_json::to_vec(&ArchiveCopy {
+    Ok(proto::encode(&ArchiveCopy {
         v: WIRE_VERSION,
         kem_output: Bytes(sealed.kem_output.as_slice().to_vec()),
         ciphertext: Bytes(sealed.ciphertext.as_slice().to_vec()),
@@ -62,9 +66,9 @@ pub fn seal_archive(archive_key: &[u8], room: &str, record: &ArchiveRecord) -> R
 /// Only the custodian's offline key gets here. `room` is the room the copy was filed
 /// under: a copy sealed for another room fails to open.
 pub fn open_archive(private_key: &[u8], room: &str, copy: &[u8]) -> Result<ArchiveRecord> {
-    let c: ArchiveCopy = serde_json::from_slice(copy)?;
+    let c: ArchiveCopy = proto::decode(copy)?;
     ensure!(c.v == WIRE_VERSION, "archive copy version {}", c.v);
-    let plain = RustCrypto::default()
+    let plain = crypto::crypto()
         .hpke_open(
             ARCHIVE_HPKE,
             &HpkeCiphertext {
@@ -76,7 +80,7 @@ pub fn open_archive(private_key: &[u8], room: &str, copy: &[u8]) -> Result<Archi
             ARCHIVE_AAD,
         )
         .map_err(|e| anyhow::anyhow!("open archive copy: {e:?}"))?;
-    let r: ArchiveRecord = serde_json::from_slice(&plain)?;
+    let r: ArchiveRecord = proto::decode(&plain)?;
     ensure!(r.v == WIRE_VERSION, "archive record version {}", r.v);
     ensure!(
         r.room == room,
@@ -89,7 +93,7 @@ pub fn open_archive(private_key: &[u8], room: &str, copy: &[u8]) -> Result<Archi
 /// Does `copy` parse as an [`ArchiveCopy`] this version can hold? All the DS can say
 /// about something it can't open.
 pub fn check_archive_shape(copy: &[u8]) -> Result<()> {
-    let c: ArchiveCopy = serde_json::from_slice(copy)?;
+    let c: ArchiveCopy = proto::decode(copy)?;
     ensure!(c.v == WIRE_VERSION, "archive copy version {}", c.v);
     ensure!(
         !c.kem_output.0.is_empty() && !c.ciphertext.0.is_empty(),
@@ -106,7 +110,7 @@ pub struct FileKey {
 
 /// AES-256-GCM under a fresh key. The tag is the last 16 bytes of the result.
 pub fn encrypt_file(plain: &[u8]) -> Result<(Vec<u8>, FileKey)> {
-    let crypto = RustCrypto::default();
+    let crypto = crypto::crypto();
     let fk = FileKey {
         key: crypto
             .random_vec(FILE_KEY_LEN)
@@ -125,7 +129,7 @@ pub fn decrypt_file(ciphertext: &[u8], key: &[u8], nonce: &[u8]) -> Result<Vec<u
     if key.len() != FILE_KEY_LEN || nonce.len() != FILE_NONCE_LEN {
         bail!("file key or nonce has the wrong length");
     }
-    RustCrypto::default()
+    crypto::crypto()
         .aead_decrypt(AeadType::Aes256Gcm, key, ciphertext, nonce, FILE_AAD)
         .map_err(|_| anyhow::anyhow!("file doesn't decrypt: wrong key or altered blob"))
 }
@@ -179,9 +183,9 @@ mod tests {
     fn a_tampered_copy_is_refused() {
         let (private, public) = crate::generate_archive_keypair().unwrap();
         let copy = seal_archive(&public, "ops", &record("ops")).unwrap();
-        let mut c: ArchiveCopy = serde_json::from_slice(&copy).unwrap();
+        let mut c: ArchiveCopy = proto::decode(&copy).unwrap();
         c.ciphertext.0[0] ^= 1;
-        assert!(open_archive(&private, "ops", &serde_json::to_vec(&c).unwrap()).is_err());
+        assert!(open_archive(&private, "ops", &proto::encode(&c).unwrap()).is_err());
         assert!(check_archive_shape(&copy).is_ok());
         assert!(check_archive_shape(b"{}").is_err());
         assert!(check_archive_shape(b"junk").is_err());

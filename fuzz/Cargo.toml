@@ -14,8 +14,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 markings = { path = "../crates/markings", features = ["sample-registers"] }
 proto = { path = "../crates/proto" }
-serde = "1"
-serde_json = "1"
+tls_codec = "0.5"
 
 [[bin]]
 name = "marking_parse"

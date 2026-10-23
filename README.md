@@ -41,7 +41,7 @@ rolled-back log: clients raise an integrity alert and stop sending.
 | Sessions: client signs a DS challenge with its ML-DSA-87 key, gets a bearer token | Tokens in DS memory, one session per CLI run; no key rotation |
 | Handshakes public, DS tracks group state, holds Welcomes | DS is single-threaded and in-memory; plain HTTP |
 | Every decision logged with a reason code, in an RFC 6962 Merkle log (C2SP tlog-tiles layout) with an ML-DSA-87 signed checkpoint after every request; entries readable only by those cleared for their marking | No witnesses or cosignatures yet; first checkpoint is trusted on first use. Clients pin the last checkpoint and refuse one that isn't signed or doesn't extend it (alert, sending stops, reads continue); `garble log verify` proves every readable entry is in the tree |
-| | Client state is a plaintext file, not SQLCipher |
+| Client state (MLS groups, cursors, history) in one SQLCipher file; purge deletes a room's rows and its MLS group in one commit | The DB key sits in a file beside the dev signing key, not in a keychain or on a card |
 
 ## Files and the records archive
 
@@ -61,7 +61,8 @@ into an append-only store; it holds no private key. Opening is `garble archive-p
 --reason TEXT --out FILE` (the DS decides `ReadArchive`, logs it, and denies anyone who isn't
 a listed records officer cleared for the room) followed by `garble-custodian read ROOM --permit
 FILE --key archive-private.hex`. Each permit opens once. The key holder can still skip the
-procedure: open questions Q16 and Q17 say where the gaps are.
+procedure: open question Q16 says where the gap is. A copy has to hold the same envelope the
+members received (its hash is in the signed AAD), or the custodian reports it as bad.
 
 ## Desktop console
 
@@ -142,6 +143,11 @@ Gotchas:
   rooms are recreated. The log in `--log-dir` persists and carries on; the DS refuses to
   start if that directory no longer matches the last checkpoint it signed.
 - The DS refuses to start without a log key that matches `trust.json`.
+- The log origin ends in the wire version (`garble-ds/v2`). A `--log-dir` left by an older
+  wire version is refused at start. To retire one: stop the DS, then
+  `garble-ds log seal --trust OLD_TRUST --log-dir DIR --log-key KEY`, and start the new DS
+  on a fresh `--log-dir` with a bundle from `garble issuer init`. A sealed log stays
+  checkable from its files alone: `garble log verify --offline DIR --trust OLD_TRUST`.
 - `trust.json` without a custodian makes every `create-room` fail with `P-006`. That's
   deliberate.
 - Credentials default to 8 hours (`--hours` or `--seconds` to change). An expired user is

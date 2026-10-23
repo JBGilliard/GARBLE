@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use client::Client;
 use identity::TrustBundle;
-use identity::archive::{decrypt_file, open_archive, sha384};
+use identity::archive::{decrypt_file, envelope_hash, open_archive, sha384};
 use proto::api::{ArchiveEntry, ArchivePermit, LogEntry};
 use proto::{ArchiveRecord, FILE, FileRef};
 
@@ -192,8 +192,9 @@ pub fn verify_permit(
 pub struct Opened {
     pub n: u64,
     pub seq: u64,
-    /// `Err` when the copy didn't open or lied about its room: a sender sealed
-    /// something else, or to someone else's key. Reported, never skipped.
+    /// `Err` when the copy didn't open, lied about its room, or holds a different
+    /// envelope than the message carried: a sender sealed something else, or to someone
+    /// else's key. Reported, never skipped.
     pub record: Result<ArchiveRecord, String>,
     /// For file messages, when `files` was given: where the decrypted file went.
     pub file: Option<Result<PathBuf, String>>,
@@ -224,7 +225,7 @@ pub fn read(
 
     let mut out = Vec::new();
     for e in held(home)?.into_iter().filter(|e| e.room == room) {
-        let record = open_archive(private_key, &e.room, &e.copy.0).map_err(|e| format!("{e:#}"));
+        let record = open_record(private_key, &e);
         let file = match (&record, files) {
             (Ok(r), Some(dir)) if r.envelope.content_type == FILE => {
                 Some(export_file(home, dir, e.n, r).map_err(|e| format!("{e:#}")))
@@ -241,8 +242,19 @@ pub fn read(
     Ok(out)
 }
 
+/// Opens the copy and holds its envelope to the hash members signed (Q17). The hash
+/// comes from the DS, but the DS took it from the sender's MLS-signed AAD.
+fn open_record(private_key: &[u8], e: &ArchiveEntry) -> Result<ArchiveRecord, String> {
+    let r = open_archive(private_key, &e.room, &e.copy.0).map_err(|e| format!("{e:#}"))?;
+    match envelope_hash(&r.envelope) {
+        Ok(h) if h == e.envelope.0 => Ok(r),
+        Ok(_) => Err("archived message differs from the one members received".into()),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
 fn export_file(home: &Path, dir: &Path, n: u64, r: &ArchiveRecord) -> Result<PathBuf> {
-    let f: FileRef = serde_json::from_slice(&r.envelope.body.0)?;
+    let f: FileRef = proto::decode(&r.envelope.body.0)?;
     let ciphertext = fs::read(home.join(BLOBS).join(hex(&f.hash.0)))
         .context("the blob isn't in this custodian's store")?;
     ensure!(
@@ -402,6 +414,59 @@ mod tests {
         let mut note = permit.clone();
         note.checkpoint.0.reverse();
         assert!(verify_permit(&trust, &note, "ops", NOW).is_err());
+    }
+
+    #[test]
+    fn a_copy_has_to_hold_the_envelope_members_received() {
+        use proto::{Envelope, Precedence, TEXT_PLAIN, WIRE_VERSION};
+
+        let envelope = |text: &str| Envelope {
+            v: WIRE_VERSION,
+            msg_id: Bytes(vec![3; 16]),
+            content_type: TEXT_PLAIN.into(),
+            precedence: Precedence::Routine,
+            body: Bytes(text.into()),
+            reply_to: None,
+            audience: vec![],
+            cosignatures: vec![],
+            forwarded_from: None,
+        };
+        let (private, public) = identity::generate_archive_keypair().unwrap();
+        let seal = |e: Envelope| {
+            let record = ArchiveRecord {
+                v: WIRE_VERSION,
+                room: "ops".into(),
+                sender: "alice".into(),
+                marking: Bytes(vec![1]),
+                sent_at: 5,
+                envelope: e,
+            };
+            Bytes(identity::archive::seal_archive(&public, "ops", &record).unwrap())
+        };
+        let entry = |copy: Bytes, signed: &Envelope| ArchiveEntry {
+            n: 0,
+            room: "ops".into(),
+            seq: 1,
+            copy,
+            blobs: vec![],
+            envelope: Bytes(envelope_hash(signed).unwrap()),
+        };
+
+        let sent = envelope("meet at noon");
+        let honest = entry(seal(sent.clone()), &sent);
+        assert_eq!(open_record(&private, &honest).unwrap().envelope, sent);
+
+        // Well-formed, opens fine, and says something else: the Q17 case.
+        let lie = entry(seal(envelope("nothing to report")), &sent);
+        let why = open_record(&private, &lie).unwrap_err();
+        assert!(why.contains("differs"), "{why}");
+
+        // A DS that lost or never had the hash can't vouch for any copy.
+        let unbound = ArchiveEntry {
+            envelope: Bytes(vec![]),
+            ..honest
+        };
+        assert!(open_record(&private, &unbound).is_err());
     }
 
     #[test]

@@ -17,10 +17,23 @@ identity = { path = "crates/identity" }
 tlog = { path = "crates/tlog" }
 client = { path = "crates/client" }
 custodian = { path = "crates/custodian" }
+crypto = { path = "crates/crypto" }
 
 openmls = { version = "0.9", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_libcrux_crypto = { version = "0.4", features = ["draft-ietf-mls-pq-ciphersuites"] }
 openmls_traits = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_memory_storage = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
+openmls_sqlite_storage = { version = "0.3", features = ["draft-ietf-mls-pq-ciphersuites"] }
+# Must match the rusqlite openmls_sqlite_storage links, or there are two SQLites in the binary.
+# SQLCipher's crypto is OpenSSL, built from source so it never depends on the host's.
+rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
+# 0.0.x: caret means exact. ML-DSA-87 only; portable code, no SIMD intrinsics.
+libcrux-ml-dsa = { version = "0.0.11", default-features = false, features = ["std", "mldsa87"] }
+# Same version openmls_libcrux_crypto uses; we only turn on its ML-KEM-in-HPKE feature.
+hpke-rs-libcrux = { version = "0.7", features = ["draft-connolly-cfrg-hpke-mlkem"] }
+zeroize = "1"
+# Same version openmls uses; the derives are for proto.
+tls_codec = { version = "0.5", features = ["derive"] }
 
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
@@ -28,7 +41,6 @@ serde_json = "1"
 hex = { version = "0.4", features = ["serde"] }
 anyhow = "1"
 openmls_rust_crypto = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
-openmls_basic_credential = { version = "0.6", features = ["draft-ietf-mls-pq-ciphersuites"] }
 ureq = { version = "3", default-features = false, features = ["json"] }
 tiny_http = "0.12"
 

@@ -11,7 +11,8 @@ cd "$(dirname "$0")/.."
 PORT=${PORT:-7778}
 DS=http://127.0.0.1:$PORT
 D=target/archive-demo
-cargo build -q -p ds -p garble-cli -p custodian
+# CARGO_FLAGS: extra cargo args, e.g. `--features crypto/libcrux` (CI runs every demo on both providers).
+cargo build -q -p ds -p garble-cli -p custodian ${CARGO_FLAGS:-}
 G=target/debug/garble
 C=target/debug/garble-custodian
 

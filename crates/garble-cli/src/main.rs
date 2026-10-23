@@ -33,7 +33,8 @@ garble --home DIR fetch ROOM SEQ [--out DIR]
 garble --home DIR archive-permit ROOM --reason TEXT --out FILE
 garble --home DIR read
 garble --home DIR log
-garble --home DIR log verify";
+garble --home DIR log verify
+garble log verify --offline LOGDIR --trust FILE";
 
 fn main() -> ExitCode {
     match run(std::env::args().skip(1).collect()) {
@@ -81,6 +82,13 @@ impl Args {
         }
         Ok(self.0.remove(0))
     }
+    /// Call before acting: a stray word is usually a typo or unquoted text.
+    fn done(&self) -> Result<()> {
+        match self.0.first() {
+            Some(extra) => bail!("unexpected argument {extra:?}\n\n{USAGE}"),
+            None => Ok(()),
+        }
+    }
 }
 
 fn run(args: Vec<String>) -> Result<()> {
@@ -89,13 +97,12 @@ fn run(args: Vec<String>) -> Result<()> {
     let cmd = a.pos("command")?;
     match (cmd.as_str(), home) {
         ("issuer", _) => issuer(&mut a),
+        // Needs no home, no DS and no account: a sealed log checks out from its files.
+        ("log", _) if a.0.iter().any(|x| x == "--offline") => verify_offline(&mut a),
         ("init", Some(home)) => {
-            let c = Client::create(
-                &home,
-                &a.req("--user")?,
-                &a.req("--ds")?,
-                &PathBuf::from(a.req("--trust")?),
-            )?;
+            let (user, ds, trust) = (a.req("--user")?, a.req("--ds")?, a.req("--trust")?);
+            a.done()?;
+            let c = Client::create(&home, &user, &ds, &PathBuf::from(trust))?;
             println!("created identity {} in {}", c.user(), home.display());
             Ok(())
         }
@@ -111,9 +118,13 @@ fn run(args: Vec<String>) -> Result<()> {
 
 fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
     match cmd {
-        "key" => println!("{}", c.public_key_hex()),
+        "key" => {
+            a.done()?;
+            println!("{}", c.public_key_hex());
+        }
         "log" if a.0.first().is_some_and(|v| v == "verify") => {
             a.0.remove(0);
+            a.done()?;
             let r = c.verify_log()?;
             let from = r.from.map_or("first checkpoint".into(), |n| {
                 format!("consistent with {n}")
@@ -127,6 +138,7 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
             );
         }
         "log" => {
+            a.done()?;
             for e in c.audit_log()? {
                 let code = e.code.map(|c| format!(" [{c}]")).unwrap_or_default();
                 println!(
@@ -136,41 +148,48 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
             }
         }
         "enroll" => {
-            let cred = serde_json::from_slice(&std::fs::read(a.req("--credential")?)?)?;
-            c.enroll(cred)?;
+            let file = a.req("--credential")?;
+            a.done()?;
+            c.enroll(serde_json::from_slice(&std::fs::read(file)?)?)?;
             println!("{} enrolled", c.user());
         }
         "create-room" => {
             let (room, ceiling) = (a.pos("ROOM")?, a.req("--ceiling")?);
+            a.done()?;
             c.create_room(&room, &ceiling)?;
             println!("created {room} with ceiling {ceiling}");
         }
         "add" => {
             let skip = a.flag("--skip-client-check");
             let (room, user) = (a.pos("ROOM")?, a.pos("USER")?);
+            a.done()?;
             c.add(&room, &user, !skip)?;
             println!("added {user} to {room}");
         }
         "set-ceiling" => {
             let ceiling = a.req("--ceiling")?;
             let room = a.pos("ROOM")?;
+            a.done()?;
             c.set_ceiling(&room, &ceiling)?;
             println!("{room} ceiling is now {ceiling}");
         }
         "dm" => {
             let ceiling = a.req("--ceiling")?;
             let peer = a.pos("USER")?;
+            a.done()?;
             let room = c.dm(&peer, &ceiling)?;
             println!("direct room {room} with {peer}");
         }
         "remove" => {
             let (room, user) = (a.pos("ROOM")?, a.pos("USER")?);
+            a.done()?;
             c.remove(&room, &user)?;
             println!("removed {user} from {room}");
         }
         "clear-fork" => {
             let note = a.req("--note")?;
             let room = a.pos("ROOM")?;
+            a.done()?;
             c.clear_fork(&room, &note)?;
             println!("{room} closed after fork investigation; recreate it with its honest members");
         }
@@ -181,28 +200,33 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
                 .transpose()?
                 .unwrap_or(7 * 86400);
             let room = a.pos("ROOM")?;
+            a.done()?;
             let removed = c.cleanup(&room, secs)?;
             println!("removed from {room}: [{}]", removed.join(", "));
         }
         "send" => {
             let marking = a.req("--marking")?;
             let (room, text) = (a.pos("ROOM")?, a.pos("TEXT")?);
+            a.done()?;
             let seq = c.send(&room, &marking, &text)?;
             println!("sent to {room} #{seq}");
         }
         "ack" => {
             let (room, seq) = (a.pos("ROOM")?, a.pos("SEQ")?.parse()?);
+            a.done()?;
             let at = c.ack(&room, seq)?;
             println!("acked {room} #{seq} as #{at}");
         }
         "forward" => {
             let (from, seq, to) = (a.pos("FROM")?, a.pos("SEQ")?.parse()?, a.pos("TO")?);
+            a.done()?;
             let at = c.forward(&from, seq, &to)?;
             println!("forwarded {from} #{seq} to {to} #{at}");
         }
         "send-file" => {
             let marking = a.req("--marking")?;
             let (room, file) = (a.pos("ROOM")?, PathBuf::from(a.pos("FILE")?));
+            a.done()?;
             let seq = c.send_file(&room, &marking, &file)?;
             println!("sent {} to {room} #{seq}", file.display());
         }
@@ -211,12 +235,14 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
                 .opt("--out")
                 .map_or_else(|| PathBuf::from("."), PathBuf::from);
             let (room, seq) = (a.pos("ROOM")?, a.pos("SEQ")?.parse()?);
+            a.done()?;
             let path = c.fetch(&room, seq, &out)?;
             println!("fetched {room} #{seq} to {}", path.display());
         }
         "archive-permit" => {
             let (reason, out) = (a.req("--reason")?, a.req("--out")?);
             let room = a.pos("ROOM")?;
+            a.done()?;
             let permit = c.archive_permit(&room, &reason)?;
             std::fs::write(&out, serde_json::to_vec_pretty(&permit)?)?;
             println!(
@@ -225,6 +251,7 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
             );
         }
         "read" => {
+            a.done()?;
             for (room, e) in c.sync()? {
                 match e {
                     Event::Joined { room } => println!("[{room}] joined"),
@@ -294,30 +321,63 @@ fn act(c: &mut Client, cmd: &str, a: &mut Args) -> Result<()> {
     Ok(())
 }
 
+/// `garble log verify --offline DIR --trust FILE`: a sealed log (`garble-ds log seal`) against
+/// the log key and origin its trust bundle names. An older log needs its own, older bundle.
+fn verify_offline(a: &mut Args) -> Result<()> {
+    let dir = a.req("--offline")?;
+    let trust = identity::TrustBundle::load(&PathBuf::from(a.req("--trust")?))?;
+    if a.pos("verify")? != "verify" {
+        bail!("only `log verify --offline` runs without --home\n\n{USAGE}");
+    }
+    a.done()?;
+    let log = trust.log.as_ref().context("trust bundle names no log")?;
+    let cp = identity::log::verify_sealed(
+        tlog::FileStore::new(&dir),
+        &log.origin,
+        &trust.log_verifier()?,
+    )
+    .with_context(|| format!("{dir} is not a verified sealed log"))?;
+    println!(
+        "{dir}: sealed log {} verified: {} entries, root {}",
+        cp.origin,
+        cp.size,
+        cp.root
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    Ok(())
+}
+
 /// Stand-in for the site attribute authority. Its secret key lives in `--out` /
 /// `--issuer`; `trust.json` beside it is what clients and the DS load.
 fn issuer(a: &mut Args) -> Result<()> {
     match a.pos("issuer command")?.as_str() {
         "init" => {
             let dir = PathBuf::from(a.req("--out")?);
+            let origin = a
+                .opt("--log-origin")
+                .unwrap_or_else(identity::log::default_origin);
+            // From `garble-ds keygen`. Without it the DS refuses to start, so the
+            // bundle can't be made without one either.
+            let log_key = hex_decode(&a.req("--log-key")?)?;
+            let custodian = a.opt("--custodian").unwrap_or_else(|| "records".into());
+            let officers = a.opt("--records-officers");
+            a.done()?;
+            identity::log::checked_origin(&origin)?;
             std::fs::create_dir_all(&dir)?;
             let issuer = MockIssuer::generate()?;
             let (private, public) = identity::generate_archive_keypair()?;
             let mut trust = issuer.trust_bundle();
-            // From `garble-ds keygen`. Without it the DS refuses to start, so the
-            // bundle can't be made without one either.
-            let origin = a.opt("--log-origin").unwrap_or_else(|| "garble-ds".into());
-            identity::log::checked_origin(&origin)?;
             trust.log = Some(identity::LogRef {
                 origin,
-                key: Bytes(hex_decode(&a.req("--log-key")?)?),
+                key: Bytes(log_key),
             });
             trust.custodian = Some(CustodianRef {
-                id: a.opt("--custodian").unwrap_or_else(|| "records".into()),
+                id: custodian,
                 archive_key: Bytes(public),
             });
-            trust.records_officers = a
-                .opt("--records-officers")
+            trust.records_officers = officers
                 .map(|s| s.split(',').map(str::to_owned).collect())
                 .unwrap_or_default();
             std::fs::write(dir.join("issuer.json"), serde_json::to_vec(&issuer)?)?;
@@ -342,9 +402,10 @@ fn issuer(a: &mut Args) -> Result<()> {
                 (Some(s), _) => s.parse()?,
                 (None, h) => h.map(|h| h.parse::<u64>()).transpose()?.unwrap_or(8) * 3600,
             };
+            let out = a.req("--out")?;
+            a.done()?;
             let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
             let cred = issuer.issue(&user, &key, &access, &citizenship, now + secs)?;
-            let out = a.req("--out")?;
             std::fs::write(&out, serde_json::to_vec_pretty(&cred)?)?;
             println!("issued {user}: {access} for {secs}s -> {out}");
         }

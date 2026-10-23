@@ -22,7 +22,7 @@ const NAME_MAX: usize = 255;
 /// What a receiver insists on before it shows a file message: a well-formed `FileRef`
 /// that names exactly the blob the sender's signed AAD declared.
 pub(crate) fn check_received(body: &[u8], aad_blobs: &[Bytes]) -> Result<FileRef> {
-    let f: FileRef = serde_json::from_slice(body)?;
+    let f: FileRef = proto::decode(body)?;
     check_ref(&f)?;
     ensure!(
         aad_blobs == [f.hash.clone()],
@@ -86,7 +86,7 @@ impl<K: KeyStore> Client<K> {
         check_ref(&file)?;
         let out = Outgoing {
             blob: Some(ciphertext),
-            ..Outgoing::new(FILE, serde_json::to_vec(&file)?)
+            ..Outgoing::new(FILE, proto::encode(&file)?)
         };
         Ok(self.post(room, "send-file", &marking, out)?.0)
     }
@@ -96,7 +96,7 @@ impl<K: KeyStore> Client<K> {
     pub fn fetch(&self, room: &str, seq: u64, dir: &Path) -> Result<PathBuf> {
         let m = self.stored(room, seq)?;
         ensure!(m.content_type == FILE, "#{seq} in {room} isn't a file");
-        let f: FileRef = serde_json::from_slice(&m.body.0)?;
+        let f: FileRef = proto::decode(&m.body.0)?;
         check_ref(&f)?;
         let name = safe_name(&f.name)?;
         let ciphertext = self.blob(&f.hash.0)?;
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn a_file_message_must_agree_with_its_signed_header() {
-        let body = serde_json::to_vec(&file()).unwrap();
+        let body = proto::encode(&file()).unwrap();
         assert!(check_received(&body, &[Bytes(vec![1; 48])]).is_ok());
         for wrong in [
             vec![],

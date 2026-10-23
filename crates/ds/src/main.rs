@@ -20,15 +20,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
-use identity::log::LogSigner;
+use crypto::Provider;
+use identity::log::{CHECKPOINT_KEY, LogSigner};
 use identity::room::{CommitView, RoomRules, leaf_identity, user_of};
 use identity::{FileKeyStore, KeyStore, TrustBundle, verify_session};
 use openmls::prelude::{tls_codec::*, *};
-use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::random::OpenMlsRand;
 use policy::Decision;
@@ -38,64 +38,133 @@ use tiny_http::{Header, Method, Request, Response, Server};
 use tlog::{FileStore, Log, TileStore};
 
 const DEFAULT_LOG_KEY: &str = "garble-ds-log.key";
-const CHECKPOINT_KEY: &str = "checkpoint";
 
-fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1).peekable();
-    if args.peek().map(String::as_str) == Some("keygen") {
-        args.next();
-        return keygen(args);
-    }
-    let (mut listen, mut trust, mut log_dir, mut log_key, mut malicious) = (
-        "127.0.0.1:7777".to_string(),
-        None,
-        PathBuf::from("garble-log"),
-        PathBuf::from(DEFAULT_LOG_KEY),
-        false,
-    );
+const USAGE: &str = "usage: garble-ds --trust FILE [--listen ADDR] [--log-dir DIR] [--log-key FILE] [--simulate-malicious]
+       garble-ds keygen [--key FILE]
+       garble-ds log seal --trust FILE [--log-dir DIR] [--log-key FILE]";
+
+/// What the flags every command shares left in `Args`.
+struct Opts {
+    listen: String,
+    trust: Option<PathBuf>,
+    log_dir: PathBuf,
+    log_key: PathBuf,
+    malicious: bool,
+}
+
+fn parse_opts(mut args: impl Iterator<Item = String>) -> Result<Opts> {
+    let mut o = Opts {
+        listen: "127.0.0.1:7777".to_string(),
+        trust: None,
+        log_dir: PathBuf::from("garble-log"),
+        log_key: PathBuf::from(DEFAULT_LOG_KEY),
+        malicious: false,
+    };
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--listen" => listen = args.next().context("--listen ADDR")?,
-            "--trust" => trust = Some(PathBuf::from(args.next().context("--trust FILE")?)),
-            "--log-dir" => log_dir = PathBuf::from(args.next().context("--log-dir DIR")?),
-            "--log-key" => log_key = PathBuf::from(args.next().context("--log-key FILE")?),
-            "--simulate-malicious" => malicious = true,
-            _ => bail!(
-                "usage: garble-ds --trust FILE [--listen ADDR] [--log-dir DIR] [--log-key FILE] [--simulate-malicious]\n       garble-ds keygen [--key FILE]"
-            ),
+            "--listen" => o.listen = args.next().context("--listen ADDR")?,
+            "--trust" => o.trust = Some(PathBuf::from(args.next().context("--trust FILE")?)),
+            "--log-dir" => o.log_dir = PathBuf::from(args.next().context("--log-dir DIR")?),
+            "--log-key" => o.log_key = PathBuf::from(args.next().context("--log-key FILE")?),
+            "--simulate-malicious" => o.malicious = true,
+            _ => bail!("{USAGE}"),
         }
     }
-    let trust =
-        TrustBundle::load(&trust.context("--trust FILE is required: the DS fails closed")?)?;
+    Ok(o)
+}
+
+/// The trust bundle's log identity and the signer for it: what the DS and `log seal` both
+/// refuse to run without. Only the DS insists on a current-version origin; `log seal`
+/// exists to close logs whose trust bundle names an older one.
+fn log_identity(o: &Opts, serving: bool) -> Result<(TrustBundle, LogSigner)> {
+    let trust = TrustBundle::load(
+        o.trust
+            .as_ref()
+            .context("--trust FILE is required: the DS fails closed")?,
+    )?;
     let log_ref = trust.log.clone().context(
         "trust bundle names no log key (garble issuer init --log-key); the DS fails closed",
     )?;
-    identity::log::checked_origin(&log_ref.origin)?;
+    if serving {
+        identity::log::checked_origin(&log_ref.origin)?;
+    }
     ensure!(
-        log_key.exists(),
+        o.log_key.exists(),
         "no log key at {}; run `garble-ds keygen --key {0}`",
-        log_key.display()
+        o.log_key.display()
     );
-    let signer = LogSigner::new(&log_ref.origin, FileKeyStore::new(&log_key).signer()?);
+    let signer = LogSigner::new(&log_ref.origin, FileKeyStore::new(&o.log_key).signer()?);
     ensure!(
         tlog::Signer::public_key(&signer) == log_ref.key.0,
         "{} is not the log key the trust bundle names",
-        log_key.display()
+        o.log_key.display()
     );
+    Ok((trust, signer))
+}
+
+fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        Some("keygen") => {
+            args.next();
+            return keygen(args);
+        }
+        Some("log") => {
+            args.next();
+            return log_command(args);
+        }
+        _ => {}
+    }
+    let o = parse_opts(args)?;
+    let (trust, signer) = log_identity(&o, true)?;
+    let (listen, log_dir, malicious) = (o.listen, o.log_dir, o.malicious);
     let log = Log::open(FileStore::new(&log_dir))?;
+    let entries = log.size();
+    // Before binding: a log it won't take shouldn't leave a port open.
+    let mut ds = Ds::new(trust, log, signer, malicious)?;
     let server = Server::http(&listen).map_err(|e| anyhow::anyhow!("listen {listen}: {e}"))?;
     eprintln!(
-        "garble-ds listening on http://{listen}, audit log {} ({} entries)",
+        "garble-ds listening on http://{listen}, audit log {} ({entries} entries)",
         log_dir.display(),
-        log.size()
     );
     if malicious {
         eprintln!("WARNING: --simulate-malicious: this DS sequences commits WITHOUT policy checks");
     }
-    let mut ds = Ds::new(trust, log, signer, malicious)?;
     for req in server.incoming_requests() {
         ds.handle(req);
     }
+    Ok(())
+}
+
+/// `garble-ds log seal --trust FILE [--log-dir DIR] [--log-key FILE]`: close a log for
+/// good with a final signed checkpoint, so it stays verifiable
+/// (`garble log verify --offline`) while a DS refuses to append to it. Stop the DS first;
+/// nothing stops a running one from signing over the seal.
+fn log_command(mut args: impl Iterator<Item = String>) -> Result<()> {
+    ensure!(args.next().as_deref() == Some("seal"), "{USAGE}");
+    let o = parse_opts(args)?;
+    ensure!(!o.malicious, "{USAGE}");
+    let (_, signer) = log_identity(&o, false)?;
+    ensure!(
+        o.log_dir.is_dir(),
+        "{} is not a log directory",
+        o.log_dir.display()
+    );
+    let sealed = identity::log::seal(&mut FileStore::new(&o.log_dir), &signer)?;
+    println!(
+        "sealed {} at {} entries, root {}",
+        o.log_dir.display(),
+        sealed.size,
+        hex(&sealed.root)
+    );
+    eprintln!(
+        "check it anywhere: garble log verify --offline {} --trust {}",
+        o.log_dir.display(),
+        o.trust
+            .as_deref()
+            .unwrap_or(Path::new("trust.json"))
+            .display()
+    );
     Ok(())
 }
 
@@ -145,6 +214,7 @@ enum Frozen {
 }
 
 const MAX_BLOBS_PER_MESSAGE: usize = 16;
+const ENVELOPE_HASH_LEN: usize = 48; // SHA-384
 /// Archive entries per pull; the custodian asks again from where it stopped.
 const ARCHIVE_PAGE: usize = 100;
 const CHALLENGE_SECS: u64 = 60;
@@ -181,7 +251,7 @@ struct Ctx {
 
 struct Ds<S: TileStore> {
     trust: TrustBundle,
-    provider: OpenMlsRustCrypto,
+    provider: Provider,
     users: BTreeMap<String, User>,
     rooms: BTreeMap<String, Room>,
     welcomes: BTreeMap<String, Vec<api::Welcome>>,
@@ -231,8 +301,14 @@ impl<S: TileStore> Ds<S> {
     /// that lost or rewrote entries refuses to come back up quietly.
     fn new(trust: TrustBundle, log: Log<S>, signer: LogSigner, malicious: bool) -> Result<Self> {
         let verifier = trust.log_verifier()?;
+        refuse_other_generation(&log)?;
         if let Some(note) = log.store().read(CHECKPOINT_KEY)? {
             let last = tlog::open_checkpoint(&note, &log_origin(&trust)?, &verifier)?;
+            ensure!(
+                !last.closed,
+                "log was sealed at {} entries; a sealed log is never appended to, start a fresh --log-dir",
+                last.size
+            );
             ensure!(
                 last.size <= log.size() && log.root_at(last.size)? == last.root,
                 "log store does not match its last signed checkpoint (size {})",
@@ -241,7 +317,7 @@ impl<S: TileStore> Ds<S> {
         }
         let mut ds = Self {
             trust,
-            provider: OpenMlsRustCrypto::default(),
+            provider: crypto::provider(),
             users: BTreeMap::new(),
             rooms: BTreeMap::new(),
             welcomes: BTreeMap::new(),
@@ -817,7 +893,7 @@ impl<S: TileStore> Ds<S> {
             pm.epoch() == room.group.group_context().epoch(),
             "stale epoch"
         );
-        let aad: AppAad = serde_json::from_slice(pm.aad()).context("message AAD")?;
+        let aad: AppAad = proto::decode(pm.aad()).context("message AAD")?;
         // The DS can't decrypt the sender; it binds the AAD claim to the session (§4.4.2).
         ensure!(
             aad.sender == user,
@@ -846,6 +922,7 @@ impl<S: TileStore> Ds<S> {
                 sent_at: aad.sent_at,
                 blobs: aad.blobs.clone(),
                 archive: aad.archive.clone(),
+                envelope: aad.envelope.clone(),
             }),
         };
         // Archive and blob bindings are structure, not policy: checked only for a
@@ -865,6 +942,7 @@ impl<S: TileStore> Ds<S> {
         }
         let archive = aad.archive.map(|h| h.0);
         let blobs = aad.blobs;
+        let envelope = aad.envelope;
         self.decided(user, room_id, "message", decision, &detail, about, |ds| {
             let Some(room) = ds.rooms.get_mut(room_id) else {
                 return 0;
@@ -882,6 +960,7 @@ impl<S: TileStore> Ds<S> {
                     seq,
                     copy: Bytes(copy.1.bytes),
                     blobs,
+                    envelope,
                 });
             }
             seq
@@ -908,6 +987,10 @@ impl<S: TileStore> Ds<S> {
                 "R-001",
                 "no sealed archive copy from this sender for this room matches the message".into(),
             ));
+        }
+        // The custodian leans on this hash, so a malformed one is refused here, not there.
+        if aad.envelope.0.len() != ENVELOPE_HASH_LEN {
+            return Err(("R-001", "message carries no envelope hash".into()));
         }
         if aad.blobs.len() > MAX_BLOBS_PER_MESSAGE {
             return Err(("B-001", "too many blobs in one message".into()));
@@ -959,6 +1042,7 @@ impl<S: TileStore> Ds<S> {
             sent_at: now(),
             blobs: vec![],
             archive: None,
+            envelope: Bytes(vec![]),
         };
         let (marking, decision) =
             rules.check_message(&self.trust, &aad, &sender.credential, &sender.key)?;
@@ -1381,6 +1465,40 @@ fn query_u64(query: &str, key: &str) -> Result<Option<u64>> {
         .transpose()
 }
 
+/// A log from an older wire version can't take v2 leaves: the tree's leaf encoding is
+/// fixed for life. Says so, and what to do, instead of failing on a signature or a
+/// decode somewhere later. Looks at the unverified checkpoint text on purpose: it only
+/// picks the message, and the verified path still runs after it.
+fn refuse_other_generation<S: TileStore>(log: &Log<S>) -> Result<()> {
+    let old = |what: &str, closed: bool| {
+        let advice = if closed {
+            "It is already sealed; check it with `garble log verify --offline DIR --trust OLD_TRUST`."
+        } else {
+            "To keep it verifiable, stop the DS and run `garble-ds log seal --trust OLD_TRUST --log-dir DIR --log-key KEY` first."
+        };
+        anyhow::anyhow!(
+            "--log-dir holds a log from an older wire version ({what}). A wire v{WIRE_VERSION} DS needs a fresh --log-dir and a trust bundle from `garble issuer init`. {advice}"
+        )
+    };
+    let mut closed = false;
+    if let Some(note) = log.store().read(CHECKPOINT_KEY)? {
+        // A checkpoint we can't even parse isn't ours: the verified path will say why.
+        if let Ok(cp) = tlog::peek_checkpoint(&note) {
+            closed = cp.closed;
+            if !identity::log::is_current_origin(&cp.origin) {
+                return Err(old(&format!("origin {:?}", cp.origin), closed));
+            }
+        }
+    }
+    // No checkpoint to go by, or one that looks current: the first leaf still has to be ours.
+    if let Some(first) = log.entries(0, log.size().min(1))?.first()
+        && LogEntry::from_leaf(first).is_err()
+    {
+        return Err(old("leaf 0 isn't a v2 entry", closed));
+    }
+    Ok(())
+}
+
 fn log_origin(trust: &TrustBundle) -> Result<String> {
     Ok(trust
         .log
@@ -1416,7 +1534,7 @@ mod tests {
     use proto::api::{ConsistencyProof, InclusionProof, LogRecord};
     use tlog::MemStore;
 
-    const ORIGIN: &str = "garble-test";
+    const ORIGIN: &str = "garble-test/v2";
 
     struct Rig {
         ds: Ds<MemStore>,
@@ -1745,6 +1863,73 @@ mod tests {
         assert!(Ds::new(trust, Log::open(foreign).unwrap(), signer(), false).is_err());
     }
 
+    /// A log directory as an older DS left it: checkpoints under an origin without the wire
+    /// version, JSON leaves. `closed` as `garble-ds log seal` leaves it.
+    fn old_log(rig: &Rig, checkpoint: bool, closed: bool) -> MemStore {
+        let signer = LogSigner::new("garble-test", FileKeyStore::new(&rig.key).signer().unwrap());
+        let mut log = Log::open(MemStore::default()).unwrap();
+        log.append(br#"{"v":1,"id":1}"#).unwrap();
+        if checkpoint {
+            let cp = tlog::Checkpoint {
+                closed,
+                ..log.checkpoint("garble-test")
+            };
+            let note = tlog::sign_checkpoint(&cp, &signer).unwrap();
+            log.store_mut().write(CHECKPOINT_KEY, &note).unwrap();
+        }
+        log.store().clone()
+    }
+
+    #[test]
+    fn a_log_from_an_older_wire_version_is_refused_with_the_way_out() {
+        let rig = Rig::new("old-log");
+        let start = |store: MemStore| {
+            Ds::new(
+                rig.ds.trust.clone(),
+                Log::open(store).unwrap(),
+                LogSigner::new(ORIGIN, FileKeyStore::new(&rig.key).signer().unwrap()),
+                false,
+            )
+            .err()
+            .expect("an old log must not start")
+            .to_string()
+        };
+        let live = start(old_log(&rig, true, false));
+        assert!(live.contains("older wire version"), "{live}");
+        assert!(live.contains("garble-ds log seal"), "{live}");
+        // Sealed already: the advice changes, the refusal doesn't.
+        let sealed = start(old_log(&rig, true, true));
+        assert!(sealed.contains("already sealed"), "{sealed}");
+        assert!(!sealed.contains("garble-ds log seal"), "{sealed}");
+        // No checkpoint to go by: the leaves give it away.
+        assert!(start(old_log(&rig, false, false)).contains("older wire version"));
+    }
+
+    #[test]
+    fn a_sealed_log_is_never_appended_to() {
+        let mut rig = Rig::new("sealed");
+        rig.user("bob", "TS//SI//NF", 3600);
+        rig.ds.append("bob", "", "session", None, "opened").unwrap();
+        rig.ds.publish_checkpoint().unwrap();
+        let mut store = rig.ds.log.store().clone();
+        let signer = LogSigner::new(ORIGIN, FileKeyStore::new(&rig.key).signer().unwrap());
+        identity::log::seal(&mut store, &signer).unwrap();
+
+        let err = Ds::new(
+            rig.ds.trust.clone(),
+            Log::open(store.clone()).unwrap(),
+            signer,
+            false,
+        )
+        .err()
+        .expect("a sealed log must not start");
+        assert!(err.to_string().contains("sealed"), "{err:#}");
+
+        let verifier = rig.ds.trust.log_verifier().unwrap();
+        let cp = identity::log::verify_sealed(store, ORIGIN, &verifier).unwrap();
+        assert_eq!(cp.size, 1);
+    }
+
     #[test]
     fn the_ds_needs_a_log_key_in_the_trust_bundle() {
         let issuer = MockIssuer::generate().unwrap();
@@ -1873,6 +2058,7 @@ mod tests {
             sent_at: 0,
             blobs: blobs.iter().map(|b| Bytes(vec![*b])).collect(),
             archive: archive.map(|a| Bytes(vec![a])),
+            envelope: Bytes(vec![0; ENVELOPE_HASH_LEN]),
         }
     }
 
@@ -1905,6 +2091,14 @@ mod tests {
             check(ds, "alice", "ops", &alice_aad(Some(1), &[], 7), 7),
             Ok(())
         );
+        // No envelope hash, or one that isn't a SHA-384: the custodian couldn't check it.
+        for len in [0, ENVELOPE_HASH_LEN - 1, ENVELOPE_HASH_LEN + 1] {
+            let aad = AppAad {
+                envelope: Bytes(vec![0; len]),
+                ..alice_aad(Some(1), &[], 7)
+            };
+            assert_eq!(check(ds, "alice", "ops", &aad, 7), Err("R-001"), "{len}");
+        }
         // Someone else's copy, or one filed for another room, archives nothing here.
         assert_eq!(
             check(ds, "bob", "ops", &alice_aad(Some(1), &[], 7), 7),
@@ -2112,6 +2306,12 @@ mod tests {
                 .filter_map(|e| e.message.as_ref())
                 .all(|m| m.archive.is_some()),
             "every message entry binds an archive copy"
+        );
+        assert!(
+            log.iter()
+                .filter_map(|e| e.message.as_ref())
+                .all(|m| m.envelope.0.len() == ENVELOPE_HASH_LEN),
+            "and the envelope it holds"
         );
         assert!(!log.iter().any(|e| e.detail.contains("launch at dawn")));
 

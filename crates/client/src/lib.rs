@@ -4,26 +4,29 @@
 //! reported to the DS so it is logged. Everything received is checked again, so a
 //! malicious DS can't slip a policy-violating commit or message past this client.
 //!
+//! State lives in one SQLCipher file, `home/store.db`, keyed from the `KeyStore`. Every
+//! change since `open` is one transaction that `save` commits, so MLS state and cursors
+//! can't drift apart; drop without `save` and it all rolls back.
+//!
 //! ponytail: walking skeleton.
-//! - One process per command: state is loaded from and saved to `home` each time.
-//!   MLS state is a plaintext JSON dump; SQLCipher (§7.2) replaces it.
-//! - Provider is `openmls_rust_crypto` (open question Q1); keys live in that storage
-//!   file, no `KeyStore` trait yet.
+//! - One process per command: state is loaded from the store on open, whole.
+//! - Crypto provider comes from the `crypto` crate (open question Q1).
 //! - Message plaintext is bare UTF-8 text; the §4.5 `Envelope` (msg ids, files) later.
 
 mod archive;
 mod audit;
 mod files;
+mod store;
 mod view;
 
 use std::cell::OnceCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail, ensure};
+use crypto::Crypto;
 use identity::room::{
     CommitView, LeafIdentity, RoomRules, attributes_extension, ciphersuite, leaf_identity, user_of,
 };
@@ -31,7 +34,6 @@ use identity::{FileKeyStore, KeyStore, TrustBundle};
 use markings::{Marking, parse};
 use openmls::prelude::tls_codec::{Deserialize as _, Serialize as _};
 use openmls::prelude::*;
-use openmls_rust_crypto::{MemoryStorage, RustCrypto};
 use openmls_traits::OpenMlsProvider;
 use openmls_traits::signatures::Signer as _;
 use policy::Decision;
@@ -40,8 +42,10 @@ use proto::{
     Forwarded, GARBLE_CREDENTIAL, HandshakeAad, MAX_BLOB, Precedence, ROOM_POLICY_EXT, RoomPolicy,
     TEXT_PLAIN, WIRE_VERSION, api,
 };
+use serde::Serialize;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use store::{MlsStorage, Store};
+use zeroize::Zeroizing;
 
 pub use audit::{IntegrityAlert, LogReport};
 pub use view::{AuditDetail, AuditLine, Inclusion, Refusal, Remembered, RoomInfo};
@@ -128,22 +132,18 @@ pub enum Event {
     },
 }
 
-#[derive(Default, Serialize, Deserialize)]
+#[derive(Default)]
 struct RoomState {
     cursor: u64,
     /// Sequence numbers of our own commits and messages, which we never re-process.
     own: BTreeSet<u64>,
     held: bool,
     /// Text messages sent or received, by stream position.
-    #[serde(default)]
     inbox: BTreeMap<u64, Stored>,
 }
 
 /// Kept so a message can be acked, forwarded or fetched later: MLS can't decrypt it
 /// twice.
-/// ponytail: plaintext in state.json like the MLS dump; SQLCipher (§7.2) replaces it,
-/// and purge already drops it with the room.
-#[derive(Serialize, Deserialize)]
 struct Stored {
     sender: String,
     msg_id: Bytes,
@@ -151,12 +151,7 @@ struct Stored {
     marking: Bytes,
     body: Bytes,
     /// `TEXT_PLAIN` or `FILE` (whose body is a `FileRef`).
-    #[serde(default = "text_plain")]
     content_type: String,
-}
-
-fn text_plain() -> String {
-    TEXT_PLAIN.into()
 }
 
 /// What a file looks like in a message list. The bytes come with `fetch`.
@@ -167,7 +162,7 @@ fn file_text(f: &FileRef) -> String {
 impl Stored {
     /// What to show for it: the text, or a line about the file.
     fn text(&self) -> String {
-        match serde_json::from_slice::<FileRef>(&self.body.0) {
+        match proto::decode::<FileRef>(&self.body.0) {
             Ok(f) if self.content_type == FILE => file_text(&f),
             _ => String::from_utf8_lossy(&self.body.0).into_owned(),
         }
@@ -194,7 +189,6 @@ impl Outgoing {
     }
 }
 
-#[derive(Serialize, Deserialize)]
 struct State {
     user: String,
     ds: String,
@@ -202,52 +196,71 @@ struct State {
     credential: Option<AttributeCredential>,
     rooms: BTreeMap<String, RoomState>,
     /// Last log checkpoint accepted, as the signed note the DS served.
-    #[serde(default)]
     checkpoint: Option<Bytes>,
     /// Why the log is distrusted, once it is.
-    #[serde(default)]
     alert: Option<String>,
 }
 
-#[derive(Default)]
-struct Provider {
-    crypto: RustCrypto,
-    storage: MemoryStorage,
+struct Provider<'a> {
+    crypto: &'a Crypto,
+    storage: MlsStorage<'a>,
 }
 
-impl OpenMlsProvider for Provider {
-    type CryptoProvider = RustCrypto;
-    type RandProvider = RustCrypto;
-    type StorageProvider = MemoryStorage;
-    fn storage(&self) -> &MemoryStorage {
+impl<'a> OpenMlsProvider for Provider<'a> {
+    type CryptoProvider = Crypto;
+    type RandProvider = Crypto;
+    type StorageProvider = MlsStorage<'a>;
+    fn storage(&self) -> &Self::StorageProvider {
         &self.storage
     }
-    fn crypto(&self) -> &RustCrypto {
-        &self.crypto
+    fn crypto(&self) -> &Crypto {
+        self.crypto
     }
-    fn rand(&self) -> &RustCrypto {
-        &self.crypto
+    fn rand(&self) -> &Crypto {
+        self.crypto
     }
 }
 
 /// A client over any [`KeyStore`]; the default is the development file store.
 pub struct Client<K: KeyStore = FileKeyStore> {
-    home: PathBuf,
     state: State,
-    provider: Provider,
+    crypto: Crypto,
+    store: Store,
     signer: K::Signer,
     trust: TrustBundle,
     http: ureq::Agent,
     session: OnceCell<String>,
+    _lock: std::fs::File,
 }
 
-/// A 200 passes; a 403 becomes a `Denied` the caller can inspect.
+/// A second process on the same home would run its own copy of the room state against
+/// the same store, and the loser's MLS epochs would no longer match the stream.
+fn lock_home(home: &Path) -> Result<std::fs::File> {
+    let f = std::fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(home.join("lock"))?;
+    match f.try_lock() {
+        Ok(()) => Ok(f),
+        Err(std::fs::TryLockError::WouldBlock) => {
+            bail!("{} is in use by another garble process", home.display())
+        }
+        Err(std::fs::TryLockError::Error(e)) => Err(e.into()),
+    }
+}
+
+/// A 200 passes; a logged 403 becomes a `Denied` the caller can inspect.
 fn ok(mut resp: ureq::http::Response<ureq::Body>) -> Result<ureq::http::Response<ureq::Body>> {
     match resp.status().as_u16() {
         200 => Ok(resp),
         401 => bail!("DS refused the session (401)"),
         403 => {
             let r: api::Refused = resp.body_mut().read_json()?;
+            // No audit ref means a malformed or failed request, not a logged decision.
+            if r.audit.is_empty() {
+                bail!("DS rejected the request: {}", r.reason);
+            }
             Err(Denied {
                 by: "DS",
                 code: r.code,
@@ -271,6 +284,10 @@ fn now() -> u64 {
         .unwrap_or(0)
 }
 
+const STORE: &str = "store.db";
+/// What wire v1 clients kept; only looked for, to say why we won't open it.
+const V1_STATE: &str = "state.json";
+
 impl Client<FileKeyStore> {
     /// Development identity: key in `home/key.json`.
     pub fn create(home: &Path, user: &str, ds: &str, trust: &Path) -> Result<Self> {
@@ -290,15 +307,15 @@ impl Client<FileKeyStore> {
 }
 
 impl<K: KeyStore> Client<K> {
-    /// Create a new identity in `home` (a fresh ML-DSA-87 key).
     /// Create a new identity in `home`, with its key in `keys`.
     pub fn create_with(home: &Path, keys: K, user: &str, ds: &str, trust: &Path) -> Result<Self> {
+        std::fs::create_dir_all(home)?;
+        let lock = lock_home(home)?;
         ensure!(
-            !home.join("state.json").exists(),
+            !home.join(STORE).exists() && !home.join(V1_STATE).exists(),
             "{} already holds an identity",
             home.display()
         );
-        std::fs::create_dir_all(home)?;
         std::fs::copy(trust, home.join("trust.json"))?;
         let state = State {
             user: user.into(),
@@ -309,33 +326,42 @@ impl<K: KeyStore> Client<K> {
             checkpoint: None,
             alert: None,
         };
-        let c = Self::assemble(home, state, Provider::default(), keys.signer()?)?;
+        let db_key = Zeroizing::new(keys.db_key()?);
+        let store = Store::create(&home.join(STORE), &db_key)?;
+        let c = Self::assemble(home, lock, state, store, keys.signer()?)?;
         c.save()?;
         Ok(c)
     }
 
     pub fn open_with(home: &Path, keys: K) -> Result<Self> {
-        let state: State = serde_json::from_slice(
-            &std::fs::read(home.join("state.json"))
-                .with_context(|| format!("no identity in {}", home.display()))?,
-        )?;
+        ensure!(
+            !home.join(V1_STATE).exists(),
+            "{} is a wire v1 home ({V1_STATE}); v2 can't read its rooms, `init` a new one",
+            home.display()
+        );
+        ensure!(
+            home.join(STORE).exists(),
+            "no identity in {}",
+            home.display()
+        );
+        let lock = lock_home(home)?;
+        let db_key = Zeroizing::new(keys.db_key()?);
+        let store = Store::open(&home.join(STORE), &db_key)?;
+        let state = store.load()?;
         ensure!(
             keys.public_key()? == state.signer_public.0,
             "key store holds a different key than this identity"
         );
-        let dump: Vec<(Bytes, Bytes)> =
-            serde_json::from_slice(&std::fs::read(home.join("mls.json"))?)?;
-        let values: HashMap<Vec<u8>, Vec<u8>> = dump.into_iter().map(|(k, v)| (k.0, v.0)).collect();
-        let provider = Provider {
-            crypto: RustCrypto::default(),
-            storage: MemoryStorage {
-                values: RwLock::new(values),
-            },
-        };
-        Self::assemble(home, state, provider, keys.signer()?)
+        Self::assemble(home, lock, state, store, keys.signer()?)
     }
 
-    fn assemble(home: &Path, state: State, provider: Provider, signer: K::Signer) -> Result<Self> {
+    fn assemble(
+        home: &Path,
+        lock: std::fs::File,
+        state: State,
+        store: Store,
+        signer: K::Signer,
+    ) -> Result<Self> {
         let trust = TrustBundle::load(&home.join("trust.json"))?;
         let http = ureq::Agent::config_builder()
             .http_status_as_error(false)
@@ -344,32 +370,39 @@ impl<K: KeyStore> Client<K> {
             .build()
             .into();
         Ok(Self {
-            home: home.into(),
             state,
-            provider,
+            crypto: crypto::crypto(),
+            store,
             signer,
             trust,
             http,
             session: OnceCell::new(),
+            _lock: lock,
         })
     }
 
+    /// Commit everything since the last save: MLS state, cursors, history, in one go.
     pub fn save(&self) -> Result<()> {
-        let values = self
-            .provider
-            .storage
-            .values
-            .read()
-            .map_err(|_| anyhow::anyhow!("storage lock poisoned"))?;
-        let dump: Vec<(Bytes, Bytes)> = values
-            .iter()
-            .map(|(k, v)| (Bytes(k.clone()), Bytes(v.clone())))
-            .collect();
-        std::fs::write(self.home.join("mls.json"), serde_json::to_vec(&dump)?)?;
-        std::fs::write(
-            self.home.join("state.json"),
-            serde_json::to_vec_pretty(&self.state)?,
-        )?;
+        self.store.flush(&self.state)?;
+        self.store.commit()
+    }
+
+    fn provider(&self) -> Provider<'_> {
+        Provider {
+            crypto: &self.crypto,
+            storage: self.store.mls(),
+        }
+    }
+
+    fn mark_own(&mut self, room: &str, seq: u64) -> Result<()> {
+        self.store.mark_own(room, seq)?;
+        self.room_state(room).own.insert(seq);
+        Ok(())
+    }
+
+    fn remember(&mut self, room: &str, seq: u64, m: Stored) -> Result<()> {
+        self.store.remember(room, seq, &m)?;
+        self.room_state(room).inbox.insert(seq, m);
         Ok(())
     }
 
@@ -513,7 +546,7 @@ impl<K: KeyStore> Client<K> {
             .leaf_node_extensions(attributes_extension(&credential)?)
             .build(
                 ciphersuite()?,
-                &self.provider,
+                &self.provider(),
                 &self.signer,
                 self.credential_with_key(),
             )?;
@@ -549,7 +582,7 @@ impl<K: KeyStore> Client<K> {
             .with_group_context_extensions(ext)
             .build();
         let mut group = MlsGroup::new_with_group_id(
-            &self.provider,
+            &self.provider(),
             &self.signer,
             &config,
             GroupId::from_slice(room.as_bytes()),
@@ -559,10 +592,10 @@ impl<K: KeyStore> Client<K> {
         let rules = RoomRules::read(group.extensions(), &self.trust)?;
         let me = self.trust.verify(self.own_credential()?, now())?;
         if let Decision::Deny(r) = rules.check_create(&me) {
-            group.delete(self.provider.storage()).ok();
+            group.delete(self.provider().storage()).ok();
             return Err(self.refuse(room, "create-room", r.code(), &r.to_string()));
         }
-        let gi = group.export_group_info(self.provider.crypto(), &self.signer, false)?;
+        let gi = group.export_group_info(self.provider().crypto(), &self.signer, false)?;
         let body = api::CreateRoom {
             room: room.into(),
             group_info: Bytes(gi.tls_serialize_detached()?),
@@ -579,7 +612,7 @@ impl<K: KeyStore> Client<K> {
         let mut group = self.writable(room, "add")?;
         let kp: Bytes = self.call(&format!("/v1/users/{joiner}/key-package"), None::<&()>)?;
         let kp = KeyPackageIn::tls_deserialize_exact(&kp.0)?
-            .validate(self.provider.crypto(), ProtocolVersion::Mls10)?;
+            .validate(self.provider().crypto(), ProtocolVersion::Mls10)?;
         // The joiner is judged on the attributes signed into its own leaf.
         let joiner_id = leaf_identity(kp.leaf_node())?;
         ensure!(joiner_id.user == joiner, "key package is not {joiner}'s");
@@ -588,7 +621,7 @@ impl<K: KeyStore> Client<K> {
             decided_at: now(),
             evidence: vec![self.own_credential()?.clone()],
         };
-        let aad = serde_json::to_vec(&aad)?;
+        let aad = proto::encode(&aad)?;
         if client_check {
             let rules = RoomRules::read(group.extensions(), &self.trust)?;
             let view = self.own_view(vec![joiner_id], vec![], None, vec![]);
@@ -598,19 +631,19 @@ impl<K: KeyStore> Client<K> {
             }
         }
         group.set_aad(aad);
-        let (commit, welcome, _) = group.add_members(&self.provider, &self.signer, &[kp])?;
+        let (commit, welcome, _) = group.add_members(&self.provider(), &self.signer, &[kp])?;
         let body = api::Commit {
             commit: Bytes(commit.tls_serialize_detached()?),
             welcome: Some(Bytes(welcome.tls_serialize_detached()?)),
         };
         match self.call::<api::Accepted>(&format!("/v1/rooms/{room}/commit"), Some(&body)) {
             Ok(a) => {
-                group.merge_pending_commit(&self.provider)?;
-                self.room_state(room).own.insert(a.seq);
+                group.merge_pending_commit(&self.provider())?;
+                self.mark_own(room, a.seq)?;
                 Ok(a.seq)
             }
             Err(e) => {
-                group.clear_pending_commit(self.provider.storage())?;
+                group.clear_pending_commit(self.provider().storage())?;
                 Err(e)
             }
         }
@@ -630,7 +663,7 @@ impl<K: KeyStore> Client<K> {
             decided_at: now(),
             evidence: vec![self.own_credential()?.clone()],
         };
-        let aad = serde_json::to_vec(&aad)?;
+        let aad = proto::encode(&aad)?;
         let rules = RoomRules::read(group.extensions(), &self.trust)?;
         let view = self.own_view(vec![], vec![target.to_owned()], None, vec![]);
         let d = rules.check_commit(&self.trust, &view, &aad, now())?;
@@ -638,19 +671,19 @@ impl<K: KeyStore> Client<K> {
             return Err(self.refuse(room, "remove", r.code(), &r.to_string()));
         }
         group.set_aad(aad);
-        let (commit, _, _) = group.remove_members(&self.provider, &self.signer, &leaves)?;
+        let (commit, _, _) = group.remove_members(&self.provider(), &self.signer, &leaves)?;
         let body = api::Commit {
             commit: Bytes(commit.tls_serialize_detached()?),
             welcome: None,
         };
         match self.call::<api::Accepted>(&format!("/v1/rooms/{room}/commit"), Some(&body)) {
             Ok(a) => {
-                group.merge_pending_commit(&self.provider)?;
-                self.room_state(room).own.insert(a.seq);
+                group.merge_pending_commit(&self.provider())?;
+                self.mark_own(room, a.seq)?;
                 Ok(a.seq)
             }
             Err(e) => {
-                group.clear_pending_commit(self.provider.storage())?;
+                group.clear_pending_commit(self.provider().storage())?;
                 Err(e)
             }
         }
@@ -692,7 +725,7 @@ impl<K: KeyStore> Client<K> {
             .map(|m| leaf_identity(group.public_group().leaf(m.index).context("member leaf")?))
             .collect::<Result<_>>()?;
         let new_rules = RoomRules::read(&ext, &self.trust)?;
-        let aad = serde_json::to_vec(&HandshakeAad {
+        let aad = proto::encode(&HandshakeAad {
             v: WIRE_VERSION,
             decided_at: now(),
             evidence: vec![self.own_credential()?.clone()],
@@ -703,19 +736,19 @@ impl<K: KeyStore> Client<K> {
         }
         group.set_aad(aad);
         let (commit, _, _) =
-            group.update_group_context_extensions(&self.provider, ext, &self.signer)?;
+            group.update_group_context_extensions(&self.provider(), ext, &self.signer)?;
         let body = api::Commit {
             commit: Bytes(commit.tls_serialize_detached()?),
             welcome: None,
         };
         match self.call::<api::Accepted>(&format!("/v1/rooms/{room}/commit"), Some(&body)) {
             Ok(a) => {
-                group.merge_pending_commit(&self.provider)?;
-                self.room_state(room).own.insert(a.seq);
+                group.merge_pending_commit(&self.provider())?;
+                self.mark_own(room, a.seq)?;
                 Ok(a.seq)
             }
             Err(e) => {
-                group.clear_pending_commit(self.provider.storage())?;
+                group.clear_pending_commit(self.provider().storage())?;
                 Err(e)
             }
         }
@@ -844,6 +877,7 @@ impl<K: KeyStore> Client<K> {
                 .map(|ct| Ok(Bytes(identity::archive::sha384(ct)?)))
                 .collect::<Result<_>>()?,
             archive: None,
+            envelope: Bytes(vec![]),
         };
         let rules = RoomRules::read(group.extensions(), &self.trust)?;
         let (_, d) = rules.check_message(
@@ -858,7 +892,7 @@ impl<K: KeyStore> Client<K> {
         if let Some(ct) = &out.blob {
             self.upload_blob(room, &aad.marking, ct)?;
         }
-        let msg_id = Bytes(self.provider.rand().random_vec(16)?);
+        let msg_id = Bytes(self.provider().rand().random_vec(16)?);
         let envelope = Envelope {
             v: WIRE_VERSION,
             msg_id: msg_id.clone(),
@@ -870,34 +904,29 @@ impl<K: KeyStore> Client<K> {
             cosignatures: vec![],
             forwarded_from: out.forwarded_from,
         };
+        aad.envelope = Bytes(identity::archive::envelope_hash(&envelope)?);
         // Sealed and filed before the message exists: no archive copy, no send.
         aad.archive = Some(self.file_archive_copy(room, &rules, &aad, &envelope)?);
-        group.set_aad(serde_json::to_vec(&aad)?);
-        let msg = group.create_message(
-            &self.provider,
-            &self.signer,
-            &serde_json::to_vec(&envelope)?,
-        )?;
+        group.set_aad(proto::encode(&aad)?);
+        let msg =
+            group.create_message(&self.provider(), &self.signer, &proto::encode(&envelope)?)?;
         let a: api::Accepted = self.call(
             &format!("/v1/rooms/{room}/messages"),
             Some(&api::Send {
                 message: Bytes(msg.tls_serialize_detached()?),
             }),
         )?;
-        let rs = self.room_state(room);
-        rs.own.insert(a.seq);
+        self.mark_own(room, a.seq)?;
         if out.content_type != ACK {
             let sender = self.state.user.clone();
-            self.room_state(room).inbox.insert(
-                a.seq,
-                Stored {
-                    sender,
-                    msg_id: msg_id.clone(),
-                    marking: aad.marking,
-                    body: Bytes(out.body),
-                    content_type: out.content_type.into(),
-                },
-            );
+            let stored = Stored {
+                sender,
+                msg_id: msg_id.clone(),
+                marking: aad.marking,
+                body: Bytes(out.body),
+                content_type: out.content_type.into(),
+            };
+            self.remember(room, a.seq, stored)?;
         }
         Ok((a.seq, msg_id))
     }
@@ -933,14 +962,14 @@ impl<K: KeyStore> Client<K> {
                 .wire_format_policy(PURE_PLAINTEXT_WIRE_FORMAT_POLICY)
                 .build();
             let group =
-                StagedWelcome::new_from_welcome(&self.provider, &join, welcome, Some(tree))?
-                    .into_group(&self.provider)?;
+                StagedWelcome::new_from_welcome(&self.provider(), &join, welcome, Some(tree))?
+                    .into_group(&self.provider())?;
             // Check 4 (idea-v1 §1a): judge the room ourselves before joining it.
             let mut group = group;
             let rules = RoomRules::read(group.extensions(), &self.trust)?;
             let me = self.trust.verify(self.own_credential()?, now())?;
             if let Decision::Deny(r) = rules.check_join(&me) {
-                group.delete(self.provider.storage())?;
+                group.delete(self.provider().storage())?;
                 let reason = r.to_string();
                 let denied = self.refuse(&w.room, "join", r.code(), &reason);
                 events.push((
@@ -1017,7 +1046,7 @@ impl<K: KeyStore> Client<K> {
             }
             let msg = MlsMessageIn::tls_deserialize_exact(&entry.message.0)?
                 .try_into_protocol_message()?;
-            let processed = group.process_message(&self.provider, msg)?;
+            let processed = group.process_message(&self.provider(), msg)?;
             let sender = user_of(processed.credential())?;
             let Sender::Member(idx) = processed.sender() else {
                 bail!("message not from a member");
@@ -1040,7 +1069,7 @@ impl<K: KeyStore> Client<K> {
                         m.into_bytes(),
                     );
                     if let Some(s) = stored {
-                        self.room_state(room).inbox.insert(entry.seq, s);
+                        self.remember(room, entry.seq, s)?;
                     }
                     out.push(event);
                 }
@@ -1054,12 +1083,12 @@ impl<K: KeyStore> Client<K> {
                     }
                     // ponytail: skew is checked by the DS; clients judge at the signed time
                     // until stream entries carry the DS sequence time (§4.4.1).
-                    let decided_at = serde_json::from_slice::<HandshakeAad>(&aad)
+                    let decided_at = proto::decode::<HandshakeAad>(&aad)
                         .map(|a| a.decided_at)
                         .unwrap_or(0);
                     match rules.check_commit(&self.trust, &view, &aad, decided_at) {
                         Ok(Decision::Permit) => {
-                            group.merge_staged_commit(&self.provider, *staged)?;
+                            group.merge_staged_commit(&self.provider(), *staged)?;
                             if let Some(new) = &view.new_rules {
                                 out.push(Event::CeilingChanged {
                                     seq: entry.seq,
@@ -1108,8 +1137,7 @@ impl<K: KeyStore> Client<K> {
     }
 
     /// We were removed: delete the room's MLS state and history, then report it.
-    /// ponytail: history and search live only in MLS state for now; when the message
-    /// store and FTS index exist (§7.2–7.3) they are purged here too.
+    /// ponytail: the search index (§7.3) goes in here too once it exists.
     fn purge(
         &mut self,
         room: &str,
@@ -1118,8 +1146,11 @@ impl<K: KeyStore> Client<K> {
         by: String,
         mut out: Vec<Event>,
     ) -> Result<Vec<Event>> {
-        group.delete(self.provider.storage())?;
+        // Group and rows leave in one commit, and before the receipt claims they're gone.
+        group.delete(self.provider().storage())?;
+        self.store.forget(room)?;
         self.state.rooms.remove(room);
+        self.save()?;
         let receipt = api::PurgeReceipt { room: room.into() };
         if let Err(e) =
             self.call::<api::Accepted>(&format!("/v1/rooms/{room}/purged"), Some(&receipt))
@@ -1149,7 +1180,7 @@ impl<K: KeyStore> Client<K> {
             };
             (event, None)
         };
-        let Ok(aad) = serde_json::from_slice::<AppAad>(aad) else {
+        let Ok(aad) = proto::decode::<AppAad>(aad) else {
             return quarantine("unreadable AAD".into());
         };
         if aad.sender != sender {
@@ -1160,11 +1191,14 @@ impl<K: KeyStore> Client<K> {
                 Ok(c) => c,
                 Err(e) => return quarantine(format!("no sender credential: {e:#}")),
             };
-        let envelope = match serde_json::from_slice::<Envelope>(&body) {
+        let envelope = match proto::decode::<Envelope>(&body) {
             Ok(e) if e.v == WIRE_VERSION => e,
             Ok(e) => return quarantine(format!("unsupported envelope version {}", e.v)),
             Err(e) => return quarantine(format!("unreadable envelope: {e}")),
         };
+        if let Err(e) = RoomRules::check_envelope(&aad, &body) {
+            return quarantine(format!("{e:#}"));
+        }
         // Reserved slots (idea-v1 §2): a v1 client can't honor them, so it refuses
         // rather than show a tearline or a 2PI message as if it were ordinary.
         if !envelope.audience.is_empty() || !envelope.cosignatures.is_empty() {
@@ -1247,7 +1281,7 @@ impl<K: KeyStore> Client<K> {
 
     fn group(&self, room: &str) -> Result<MlsGroup> {
         MlsGroup::load(
-            self.provider.storage(),
+            self.provider().storage(),
             &GroupId::from_slice(room.as_bytes()),
         )?
         .with_context(|| format!("not a member of {room}"))
@@ -1287,10 +1321,7 @@ fn room_extensions(
         records_officers: records_officers.to_vec(),
     };
     Ok(Extensions::from_vec(vec![
-        Extension::Unknown(
-            ROOM_POLICY_EXT,
-            UnknownExtension(serde_json::to_vec(&policy)?),
-        ),
+        Extension::Unknown(ROOM_POLICY_EXT, UnknownExtension(proto::encode(&policy)?)),
         Extension::RequiredCapabilities(RequiredCapabilitiesExtension::new(
             &[ExtensionType::Unknown(ROOM_POLICY_EXT)],
             &[],
@@ -1310,4 +1341,29 @@ fn capabilities() -> Result<Capabilities> {
         None,
         Some(&[CredentialType::Other(GARBLE_CREDENTIAL)]),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use identity::{AttributeIssuer, MockIssuer};
+
+    use super::*;
+
+    #[test]
+    fn one_process_per_home() {
+        let dir = std::env::temp_dir().join(format!("garble-client-lock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let trust = dir.join("trust.json");
+        let bundle = MockIssuer::generate().expect("issuer").trust_bundle();
+        std::fs::write(&trust, serde_json::to_vec(&bundle).expect("json")).expect("write");
+        let home = dir.join("home");
+
+        let first = Client::create(&home, "alice", "http://127.0.0.1:1", &trust).expect("create");
+        let err = Client::open(&home).err().expect("second open refused");
+        assert!(format!("{err:#}").contains("in use"), "{err:#}");
+        drop(first);
+        Client::open(&home).expect("open after the first is gone");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

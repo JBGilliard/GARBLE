@@ -217,6 +217,24 @@ fn entries_come_back_as_appended() {
 }
 
 #[test]
+fn the_root_rebuilt_from_entries_matches_and_notices_edited_entries() {
+    for n in [0, 1, 2, 255, 256, 257, 700] {
+        let (log, entries) = build(n);
+        assert_eq!(log.recompute_root().unwrap(), mth(&entries), "size {n}");
+    }
+    // Same length, one byte different: `open` is happy, the recomputed root is not.
+    let (log, _) = build(300);
+    let mut store = log.store().clone();
+    let key = "tile/entries/001.p/44";
+    let bundle = store.0.get_mut(key).unwrap();
+    let last = bundle.len() - 1;
+    bundle[last] ^= 1;
+    let edited = Log::open(store).unwrap();
+    assert_eq!(edited.root(), log.root());
+    assert_ne!(edited.recompute_root().unwrap(), log.root());
+}
+
+#[test]
 fn a_reopened_log_carries_on() {
     let (log, mut entries) = build(300);
     let before = log.root();

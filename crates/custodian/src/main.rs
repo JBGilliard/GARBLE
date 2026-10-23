@@ -122,7 +122,7 @@ fn run(args: Vec<String>) -> Result<()> {
                         "forwarded_from": r.envelope.forwarded_from,
                         "body": match r.envelope.content_type.as_str() {
                             TEXT_PLAIN => String::from_utf8_lossy(&r.envelope.body.0).into_owned(),
-                            FILE => serde_json::from_slice::<FileRef>(&r.envelope.body.0)
+                            FILE => proto::decode::<FileRef>(&r.envelope.body.0)
                                 .map_or("unreadable file reference".into(), |f| {
                                     format!("[file] {} ({} bytes)", f.name, f.size)
                                 }),
